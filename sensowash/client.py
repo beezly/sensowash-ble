@@ -895,7 +895,7 @@ class SensoWashClient:
                 seat_heating=fl.get("seat_heating", False),
                 seat_heating_schedule=fl.get("seat_heating", False),
                 proximity_detection=fl.get("human_sensor", False),
-                seat_occupied_sensor=fl.get("human_sensor", False),
+                seat_occupied_sensor=True,  # always available: derived from toilet state bitmask
                 actual_seat_temperature=False,
                 deodorization=fl.get("deodorization", False),
                 deodorization_auto=fl.get("deodorization", False),
