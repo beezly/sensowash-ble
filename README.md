@@ -151,6 +151,96 @@ BLE notification received from the toilet.
 | `set_water_hardness(hardness)` | `WaterHardness.LEVEL_0–4` |
 | `get_descaling_state()` | Raw descaling state bytes |
 
+#### Seat Heating Schedule
+| Method | Description |
+|---|---|
+| `get_seat_heating_schedule()` | Read the current seat heating schedule → `SeatHeatingSchedule` |
+| `set_seat_heating_schedule(schedule)` | Write a new schedule |
+| `clear_seat_heating_schedule()` | Remove all scheduled windows |
+
+#### UVC Disinfection Schedule
+| Method | Description |
+|---|---|
+| `get_uvc_schedule()` | Read the current UVC schedule → `UvcSchedule` |
+| `set_uvc_schedule(schedule)` | Write a new schedule |
+| `set_uvc_schedule_default()` | Restore factory default (02:00 + 03:00 daily) |
+
+---
+
+---
+
+## Scheduling
+
+The toilet runs two autonomous schedules — BLE is only needed to read or set them.
+The client syncs the onboard RTC on every connect automatically.
+
+### Seat Heating Schedule
+
+```python
+from sensowash import (
+    SeatHeatingSchedule, SeatScheduleWindow, SeatTemperature,
+    ALL_WEEKDAYS, ALL_WEEKEND,
+)
+
+# Define a schedule with two windows
+schedule = SeatHeatingSchedule(
+    enabled=True,
+    temperature=SeatTemperature.TEMP_2,
+    windows=[
+        SeatScheduleWindow(
+            from_hour=6, from_minute=30,
+            to_hour=8,   to_minute=0,
+            days=ALL_WEEKDAYS,          # Mon–Fri
+        ),
+        SeatScheduleWindow(
+            from_hour=8, from_minute=0,
+            to_hour=9,   to_minute=30,
+            days=ALL_WEEKEND,           # Sat–Sun
+        ),
+    ],
+)
+
+async with SensoWashClient("AA:BB:CC:DD:EE:FF") as toilet:
+    await toilet.set_seat_heating_schedule(schedule)
+
+    # Read back
+    current = await toilet.get_seat_heating_schedule()
+    for w in current.windows:
+        print(w)   # → "06:30–08:00 [MonTueWedThuFri]"
+```
+
+**Wire format:** 7 bytes per (day × window) entry — `[day][fromH][fromM][0x00][durLo][durHi][temp]`.
+Duration is in minutes, little-endian. A 5-day window writes 5 entries.
+
+### UVC Disinfection Schedule
+
+```python
+from sensowash import UvcSchedule, UvcScheduleTime
+
+# Two daily disinfection runs
+schedule = UvcSchedule(triggers=[
+    UvcScheduleTime(hour=2, minute=0),   # 02:00
+    UvcScheduleTime(hour=4, minute=0),   # 04:00
+])
+
+async with SensoWashClient("AA:BB:CC:DD:EE:FF") as toilet:
+    await toilet.set_uvc_schedule(schedule)
+
+    # Restore factory default (02:00 + 03:00)
+    await toilet.set_uvc_schedule_default()
+```
+
+**Wire format:** 3 bytes per trigger — `[hour][minute][0x00]`.
+Each cycle runs for exactly **20 minutes** (fixed by firmware). Triggers fire **daily** —
+there is no per-weekday control for UVC.
+
+### Day constants
+
+```python
+from sensowash import MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY
+from sensowash import ALL_WEEKDAYS, ALL_WEEKEND, ALL_DAYS
+```
+
 ---
 
 ## Enumerations

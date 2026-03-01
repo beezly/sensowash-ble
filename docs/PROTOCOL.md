@@ -324,6 +324,99 @@ Byte 1:
 
 ---
 
+---
+
+## Scheduling
+
+The toilet has an onboard RTC and runs two types of schedule **autonomously** — BLE is
+only needed to read or update them. Time sync on connect is therefore required (handled
+automatically by the client).
+
+---
+
+### Seat Heating Schedule (Energy Saving)
+
+**Characteristic:** `SEAT_TEMPERATURE_PROGRAMMED` (`c635f814-c6e5-49cb-8b31-2f4192091307`)
+
+Defines time windows during which the seat heating is active. The toilet turns heating on
+and off autonomously at the configured times.
+
+#### Wire Format
+
+Each (day, window) pair is encoded as **7 bytes**:
+
+```
+Offset  Size  Field
+──────────────────────────────────────────────────────────
+0       1     dayOfWeek   Mon=1, Tue=2, Wed=3, Thu=4, Fri=5, Sat=6, Sun=7
+1       1     fromHour    0–23
+2       1     fromMinute  0–59
+3       1     0x00        padding
+4       1     durationLow  duration in minutes, low byte
+5       1     durationHigh duration in minutes, high byte (little-endian)
+6       1     tempValue   SeatTemperature enum value (0–3)
+```
+
+- Duration is `(to_time - from_time)` in minutes, wrapping correctly for midnight-spanning
+  windows.
+- If a window applies to multiple days (e.g. Mon–Fri), it is stored as **5 separate
+  7-byte entries** — one per day. The app merges entries with matching times back into a
+  single window object on read.
+- An empty characteristic (0 bytes) means no schedule.
+
+#### Example
+
+Weekday mornings 06:30–08:00 (90 min) at temperature level 2:
+
+```python
+# 90-minute window, Mon–Fri
+for day in [1, 2, 3, 4, 5]:
+    payload += bytes([day, 6, 30, 0, 90 & 0xFF, 90 >> 8, 2])
+# → 35 bytes total
+```
+
+---
+
+### UVC / HygieneUV Light Schedule
+
+**Characteristic:** `UVC_PROGRAMMED` (`26e57692-f4e2-4b5d-81da-08b0a645db3e`)
+
+Defines daily trigger times for the UVC disinfection cycle. Each trigger fires every day
+(no per-weekday control). The cycle duration is **fixed at 20 minutes** by the firmware.
+
+#### Wire Format
+
+Each trigger is **3 bytes**:
+
+```
+Offset  Size  Field
+──────────────────────────────────────
+0       1     hour    0–23
+1       1     minute  0–59
+2       1     0x00    padding (seconds, always 0)
+```
+
+- Any number of triggers can be stored (0 = no schedule).
+- Triggers fire daily — there is no weekday filtering.
+- Each run lasts exactly 20 minutes regardless of configuration.
+
+#### Factory Defaults
+
+The app pre-populates two triggers on first setup:
+- `02:00` — first disinfection
+- `03:00` — second disinfection (first + 60 min)
+
+#### Example
+
+Two daily triggers at 02:00 and 04:00:
+
+```python
+payload = bytes([2, 0, 0,   # 02:00
+                 4, 0, 0])  # 04:00
+```
+
+---
+
 ## Notes
 
 - The app includes a fully-implemented virtual toilet simulator (all models) in the release

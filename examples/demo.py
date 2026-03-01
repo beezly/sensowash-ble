@@ -21,6 +21,8 @@ from sensowash import SensoWashClient
 from sensowash.models import (
     WaterFlow, WaterTemperature, NozzlePosition,
     SeatTemperature, DryerTemperature, DryerSpeed,
+    SeatHeatingSchedule, SeatScheduleWindow, UvcSchedule, UvcScheduleTime,
+    ALL_WEEKDAYS, ALL_WEEKEND, ALL_DAYS,
 )
 
 
@@ -81,6 +83,8 @@ async def main():
         print("  7) Set seat temperature")
         print("  8) Toggle ambient light")
         print("  9) Toggle mute")
+        print("  s) View / set seat heating schedule")
+        print("  u) View / set UVC disinfection schedule")
         print("  0) Stop / exit")
 
         choice = input("\nChoice: ").strip()
@@ -153,11 +157,104 @@ async def main():
             await toilet.set_mute(new_state)
             print(f"  🔇 Mute {'on' if new_state else 'off'}.")
 
+        elif choice == "s":
+            await demo_seat_schedule(toilet)
+
+        elif choice == "u":
+            await demo_uvc_schedule(toilet)
+
         elif choice == "0":
             print("  ⏹ Stopping...")
             await toilet.stop()
 
         print("\n👋 Done. Disconnecting.")
+
+
+async def demo_seat_schedule(toilet: SensoWashClient) -> None:
+    """Interactive seat heating schedule manager."""
+    print("\n── Seat Heating Schedule ───────────────────────────────")
+    current = await toilet.get_seat_heating_schedule()
+    if current:
+        print(f"  Enabled:     {current.enabled}")
+        print(f"  Temperature: {current.temperature.name}")
+        if current.windows:
+            print("  Windows:")
+            for w in current.windows:
+                print(f"    {w}")
+        else:
+            print("  Windows: (none)")
+    else:
+        print("  (characteristic not available on this model)")
+        return
+
+    print("\n  a) Apply example schedule (weekday mornings + weekend late morning)")
+    print("  c) Clear all windows")
+    print("  x) Back")
+    sub = input("  Choice: ").strip()
+
+    if sub == "a":
+        schedule = SeatHeatingSchedule(
+            enabled=True,
+            temperature=SeatTemperature.TEMP_2,
+            windows=[
+                SeatScheduleWindow(
+                    from_hour=6, from_minute=30,
+                    to_hour=8,   to_minute=0,
+                    days=ALL_WEEKDAYS,
+                ),
+                SeatScheduleWindow(
+                    from_hour=8, from_minute=0,
+                    to_hour=9,   to_minute=30,
+                    days=ALL_WEEKEND,
+                ),
+            ],
+        )
+        await toilet.set_seat_heating_schedule(schedule)
+        print("  ✅ Schedule written.")
+        print(f"     Weekday window: 06:30–08:00 at {schedule.temperature.name}")
+        print(f"     Weekend window: 08:00–09:30 at {schedule.temperature.name}")
+
+    elif sub == "c":
+        await toilet.clear_seat_heating_schedule()
+        print("  ✅ Schedule cleared.")
+
+
+async def demo_uvc_schedule(toilet: SensoWashClient) -> None:
+    """Interactive UVC schedule manager."""
+    print("\n── UVC Disinfection Schedule ───────────────────────────")
+    current = await toilet.get_uvc_schedule()
+    if current is not None:
+        if current.triggers:
+            print(f"  Triggers ({len(current.triggers)}):")
+            for t in current.triggers:
+                print(f"    {t}")
+        else:
+            print("  Triggers: (none)")
+    else:
+        print("  (characteristic not available on this model)")
+        return
+
+    print("\n  a) Apply example (2am + 4am daily)")
+    print("  d) Restore factory default (2am + 3am)")
+    print("  c) Clear all triggers")
+    print("  x) Back")
+    sub = input("  Choice: ").strip()
+
+    if sub == "a":
+        schedule = UvcSchedule(triggers=[
+            UvcScheduleTime(hour=2, minute=0),
+            UvcScheduleTime(hour=4, minute=0),
+        ])
+        await toilet.set_uvc_schedule(schedule)
+        print("  ✅ UVC schedule set: 02:00 and 04:00 daily (20 min each).")
+
+    elif sub == "d":
+        await toilet.set_uvc_schedule_default()
+        print("  ✅ UVC schedule restored to default: 02:00 and 03:00.")
+
+    elif sub == "c":
+        await toilet.set_uvc_schedule(UvcSchedule(triggers=[]))
+        print("  ✅ UVC schedule cleared.")
 
 
 if __name__ == "__main__":

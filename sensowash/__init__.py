@@ -19,6 +19,12 @@ from .models import (
     ErrorCode,
     ToiletState,
     DeviceInfo,
+    SeatScheduleWindow,
+    SeatHeatingSchedule,
+    UvcScheduleTime,
+    UvcSchedule,
+    MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY,
+    ALL_WEEKDAYS, ALL_WEEKEND, ALL_DAYS,
 )
 from .constants import SERVICES, CHARACTERISTICS
 

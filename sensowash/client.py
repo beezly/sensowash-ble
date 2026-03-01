@@ -34,6 +34,7 @@ from .models import (
     DeviceInfo, ToiletState, ErrorCode,
     OnOff, WaterFlow, WaterTemperature, NozzlePosition,
     SeatTemperature, DryerTemperature, DryerSpeed, LidState, WaterHardness,
+    SeatHeatingSchedule, UvcSchedule,
 )
 
 
@@ -405,6 +406,96 @@ class SensoWashClient:
     async def get_descaling_state(self) -> Optional[bytes]:
         """Raw descaling state bytes for inspection."""
         return await self._read("DESCALING_STATE")
+
+    # ── Seat heating schedule ──────────────────────────────────────────────────
+
+    async def get_seat_heating_schedule(self) -> Optional[SeatHeatingSchedule]:
+        """
+        Read the programmed seat heating schedule from the toilet.
+
+        Returns a SeatHeatingSchedule, or None if the characteristic is unavailable.
+        The toilet runs this schedule autonomously — seat heating turns on/off
+        at the configured times without needing BLE connection.
+        """
+        data = await self._read("SEAT_TEMPERATURE_PROGRAMMED")
+        if data is None:
+            return None
+        # The current setpoint temperature is used as the scheduled temperature
+        temp_raw = await self._read_byte("SEAT_TEMPERATURE")
+        try:
+            temp = SeatTemperature(temp_raw) if temp_raw is not None else SeatTemperature.TEMP_1
+        except ValueError:
+            temp = SeatTemperature.TEMP_1
+        return SeatHeatingSchedule.from_bytes(data, enabled=True, temperature=temp)
+
+    async def set_seat_heating_schedule(self, schedule: SeatHeatingSchedule) -> None:
+        """
+        Write a seat heating schedule to the toilet.
+
+        The toilet's RTC must be synced (done automatically on connect) for
+        schedules to fire correctly.
+
+        Example — warm seat on weekday mornings::
+
+            from sensowash import SeatHeatingSchedule, SeatScheduleWindow
+            from sensowash import SeatTemperature, ALL_WEEKDAYS
+
+            schedule = SeatHeatingSchedule(
+                enabled=True,
+                temperature=SeatTemperature.TEMP_2,
+                windows=[
+                    SeatScheduleWindow(
+                        from_hour=6, from_minute=30,
+                        to_hour=8,   to_minute=30,
+                        days=ALL_WEEKDAYS,
+                    ),
+                ],
+            )
+            await toilet.set_seat_heating_schedule(schedule)
+        """
+        payload = schedule.to_bytes()
+        await self._write("SEAT_TEMPERATURE_PROGRAMMED", payload)
+
+    async def clear_seat_heating_schedule(self) -> None:
+        """Remove all seat heating schedule windows."""
+        await self._write("SEAT_TEMPERATURE_PROGRAMMED", b"")
+
+    # ── UVC light schedule ─────────────────────────────────────────────────────
+
+    async def get_uvc_schedule(self) -> Optional[UvcSchedule]:
+        """
+        Read the programmed UVC / HygieneUV light schedule.
+
+        Returns a UvcSchedule with the list of daily trigger times.
+        Each trigger runs a 20-minute disinfection cycle.
+        """
+        data = await self._read("UVC_PROGRAMMED")
+        if data is None:
+            return None
+        return UvcSchedule.from_bytes(data)
+
+    async def set_uvc_schedule(self, schedule: UvcSchedule) -> None:
+        """
+        Write a UVC disinfection schedule to the toilet.
+
+        Triggers fire daily at the specified times regardless of weekday.
+        Each run lasts 20 minutes (fixed by firmware).
+
+        Example — disinfect at 2am and 4am::
+
+            from sensowash import UvcSchedule, UvcScheduleTime
+
+            schedule = UvcSchedule(triggers=[
+                UvcScheduleTime(hour=2, minute=0),
+                UvcScheduleTime(hour=4, minute=0),
+            ])
+            await toilet.set_uvc_schedule(schedule)
+        """
+        await self._write("UVC_PROGRAMMED", schedule.to_bytes())
+
+    async def set_uvc_schedule_default(self) -> None:
+        """Restore UVC schedule to factory default (02:00 and 03:00 daily)."""
+        await self.set_uvc_schedule(UvcSchedule.default())
 
     # ── Full state snapshot ────────────────────────────────────────────────────
 

@@ -6,7 +6,7 @@ Wire format: single unsigned byte per enum value (except where noted).
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import List, Optional
 
@@ -216,3 +216,201 @@ class ErrorCode:
                     if ec:
                         errors.append(ec)
         return errors
+
+
+# ── Scheduling ─────────────────────────────────────────────────────────────────
+
+# Day-of-week constants matching the toilet's wire values (Mon=1 … Sun=7)
+MONDAY    = 1
+TUESDAY   = 2
+WEDNESDAY = 3
+THURSDAY  = 4
+FRIDAY    = 5
+SATURDAY  = 6
+SUNDAY    = 7
+
+ALL_WEEKDAYS = (MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY)
+ALL_WEEKEND  = (SATURDAY, SUNDAY)
+ALL_DAYS     = ALL_WEEKDAYS + ALL_WEEKEND
+
+
+@dataclass
+class SeatScheduleWindow:
+    """
+    A time window during which the seat heating should be active.
+
+    The toilet stores one entry per (day, window) pair — this class represents
+    a single window that can apply to multiple days.
+
+    Args:
+        from_hour:    Start hour (0–23)
+        from_minute:  Start minute (0–59)
+        to_hour:      End hour (0–23)
+        to_minute:    End minute (0–59)
+        days:         Tuple of day constants (MONDAY–SUNDAY).  Defaults to all days.
+    """
+    from_hour:   int
+    from_minute: int
+    to_hour:     int
+    to_minute:   int
+    days:        tuple = field(default_factory=lambda: ALL_DAYS)
+
+    @property
+    def duration_minutes(self) -> int:
+        """Duration of this window in minutes (handles midnight wrap)."""
+        start = self.from_hour * 60 + self.from_minute
+        end   = self.to_hour   * 60 + self.to_minute
+        if end <= start:
+            end += 1440  # crosses midnight
+        return end - start
+
+    def __str__(self) -> str:
+        day_names = {1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 7: "Sun"}
+        days_str  = "".join(day_names[d] for d in sorted(self.days))
+        return (f"{self.from_hour:02d}:{self.from_minute:02d}–"
+                f"{self.to_hour:02d}:{self.to_minute:02d} [{days_str}]")
+
+
+@dataclass
+class SeatHeatingSchedule:
+    """
+    Complete energy-saving / programmed seat heating schedule.
+
+    Args:
+        enabled:         Whether scheduled control is active.
+        temperature:     The seat temperature to maintain during active windows.
+        windows:         List of SeatScheduleWindow entries.
+    """
+    enabled:     bool
+    temperature: SeatTemperature
+    windows:     List[SeatScheduleWindow] = field(default_factory=list)
+
+    # ── Serialisation ──────────────────────────────────────────────────────────
+
+    def to_bytes(self) -> bytes:
+        """
+        Encode to the BLE wire format.
+
+        Each (day, window) pair becomes 7 bytes:
+          [dayOfWeek][fromHour][fromMinute][0x00][durationLow][durationHigh][tempValue]
+        """
+        out = bytearray()
+        for window in self.windows:
+            dur = window.duration_minutes
+            dur_lo = dur & 0xFF
+            dur_hi = (dur >> 8) & 0xFF
+            for day in sorted(window.days):
+                out += bytes([
+                    day,
+                    window.from_hour,
+                    window.from_minute,
+                    0x00,
+                    dur_lo,
+                    dur_hi,
+                    self.temperature.value,
+                ])
+        return bytes(out)
+
+    @classmethod
+    def from_bytes(
+        cls,
+        data: bytes,
+        enabled: bool = True,
+        temperature: SeatTemperature = SeatTemperature.TEMP_1,
+    ) -> "SeatHeatingSchedule":
+        """
+        Decode from the BLE wire format.
+
+        Merges entries that share the same time window across different days
+        (mirrors the app's behaviour).
+        """
+        windows: List[SeatScheduleWindow] = []
+        entry_count = len(data) // 7
+        for i in range(entry_count):
+            base = i * 7
+            day       = data[base]
+            fh        = data[base + 1]
+            fm        = data[base + 2]
+            dur       = data[base + 4] | (data[base + 5] << 8)
+            temp_val  = data[base + 6]
+            # Recover to_hour / to_minute from duration
+            total_end = fh * 60 + fm + dur
+            th, tm    = divmod(total_end % 1440, 60)
+            try:
+                temperature = SeatTemperature(temp_val)
+            except ValueError:
+                pass
+            # Merge into existing window with the same times, or create new
+            match = next(
+                (w for w in windows
+                 if w.from_hour == fh and w.from_minute == fm
+                 and w.to_hour == th and w.to_minute == tm),
+                None,
+            )
+            if match:
+                match.days = tuple(sorted(set(match.days) | {day}))
+            else:
+                windows.append(SeatScheduleWindow(fh, fm, th, tm, days=(day,)))
+        return cls(enabled=enabled, temperature=temperature, windows=windows)
+
+
+@dataclass
+class UvcScheduleTime:
+    """
+    A single daily UVC disinfection trigger time.
+
+    The cycle always runs for 20 minutes from this time.
+
+    Args:
+        hour:   Trigger hour (0–23)
+        minute: Trigger minute (0–59)
+    """
+    hour:   int
+    minute: int
+
+    def __str__(self) -> str:
+        return f"{self.hour:02d}:{self.minute:02d} (20 min cycle)"
+
+
+@dataclass
+class UvcSchedule:
+    """
+    Complete programmed UVC / HygieneUV light schedule.
+
+    The toilet runs all triggers daily (no per-weekday control).
+    Each run lasts 20 minutes.
+
+    Args:
+        triggers: List of UvcScheduleTime entries.
+    """
+    triggers: List[UvcScheduleTime] = field(default_factory=list)
+
+    _CYCLE_MINUTES = 20  # fixed run duration, hardcoded in firmware
+
+    # ── Defaults ───────────────────────────────────────────────────────────────
+
+    @classmethod
+    def default(cls) -> "UvcSchedule":
+        """Factory default: 02:00 and 03:00 daily."""
+        return cls(triggers=[UvcScheduleTime(2, 0), UvcScheduleTime(3, 0)])
+
+    # ── Serialisation ──────────────────────────────────────────────────────────
+
+    def to_bytes(self) -> bytes:
+        """
+        Encode to the BLE wire format.
+        Each trigger is 3 bytes: [hour][minute][0x00]
+        """
+        out = bytearray()
+        for t in self.triggers:
+            out += bytes([t.hour, t.minute, 0x00])
+        return bytes(out)
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "UvcSchedule":
+        """Decode from the BLE wire format (3 bytes per trigger)."""
+        triggers = []
+        for i in range(len(data) // 3):
+            base = i * 3
+            triggers.append(UvcScheduleTime(data[base], data[base + 1]))
+        return cls(triggers=triggers)
