@@ -42,6 +42,7 @@ from .models import (
     model_name_from_article,
 )
 from .serial import SerialTransport, SERVICE_UUID as SERIAL_SERVICE_UUID, pair as serial_pair
+from .exceptions import SensoWashError, ConnectionError, PairingRequired
 
 
 def _byte(value: int) -> bytes:
@@ -107,8 +108,12 @@ class SensoWashClient:
         over a proprietary BLE service — detected automatically by checking which
         services are present after connection.
         """
+        from bleak.exc import BleakError
         self._client = BleakClient(self._address, timeout=self._timeout)
-        await self._client.connect()
+        try:
+            await self._client.connect()
+        except BleakError as exc:
+            raise ConnectionError(f"Failed to connect to toilet: {exc}") from exc
         self._char_cache = {}
         self._serial = None
 
@@ -128,6 +133,12 @@ class SensoWashClient:
             issued_key = await self._serial.setup(pairing_key=self._pairing_key)
             if issued_key and not self._pairing_key:
                 self._pairing_key = issued_key
+            elif not issued_key and not self._pairing_key:
+                raise PairingRequired(
+                    "This toilet requires pairing before commands will work. "
+                    "Call SensoWashClient.pair(address) first to obtain a pairing key, "
+                    "then pass it as pairing_key= when constructing SensoWashClient."
+                )
             await self._serial.sync_time()
         else:
             _LOGGER.info("GATT protocol detected")
@@ -882,11 +893,25 @@ class SensoWashClient:
         """
         Read all readable characteristics and return a dict snapshot.
         Useful for debugging or building a dashboard.
+
+        Always includes a ``"protocol"`` key (either ``"serial"`` or ``"gatt"``).
+
+        **Serial protocol** returns raw state bits decoded from the toilet's state
+        response packet — see :meth:`get_toilet_state_raw` for field descriptions.
+        Additional keys: ``water_hardness``, ``errors``.
+
+        **GATT protocol** returns per-characteristic values as enum instances where
+        applicable.  Additional keys: ``errors``, plus all GATT characteristic names.
+
+        The two shapes differ because the serial protocol packs state into bitmasks
+        while GATT exposes individual characteristics.  Check ``state["protocol"]``
+        to know which shape you received.
         """
         if self._serial:
             state = await self.get_toilet_state_raw() or {}
             errors = await self.get_error_codes()
             hw = await self.get_water_hardness()
+            state["protocol"] = "serial"
             state["water_hardness"] = hw
             state["errors"] = errors
             return state
@@ -910,7 +935,7 @@ class SensoWashClient:
             "mute":               ("MUTE",               OnOff),
             "water_hardness":     ("WATER_HARDNESS",     WaterHardness),
         }
-        state: Dict[str, Any] = {}
+        state: Dict[str, Any] = {"protocol": "gatt"}
         for name, (key, enum_type) in reads.items():
             raw = await self._read_byte(key)
             if raw is not None:

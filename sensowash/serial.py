@@ -25,6 +25,8 @@ from typing import Callable, Dict, Optional
 from bleak import BleakClient
 from bleak.backends.characteristic import BleakGATTCharacteristic
 
+from .exceptions import PairingTimeout
+
 _LOGGER = logging.getLogger(__name__)
 
 # ── Serial service / characteristic UUIDs ─────────────────────────────────────
@@ -135,7 +137,7 @@ async def pair(address_or_device, timeout: float = 30.0) -> bytes:
         connections.
 
     Raises:
-        asyncio.TimeoutError: If the toilet does not respond in time.
+        PairingTimeout: If the toilet does not respond in time (button not pressed).
         RuntimeError: If the device does not expose the serial shake characteristic.
     """
     from bleak import BleakClient
@@ -155,7 +157,13 @@ async def pair(address_or_device, timeout: float = 30.0) -> bytes:
 
         await client.start_notify(shake_char, on_shake)
         await client.write_gatt_char(shake_char, bytes(4), response=True)
-        key = await asyncio.wait_for(fut, timeout=timeout)
+        try:
+            key = await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            raise PairingTimeout(
+                f"Toilet did not respond within {timeout}s — "
+                "press the Bluetooth button on the unit to confirm pairing."
+            )
         return key
 
 class SerialTransport:
@@ -243,8 +251,10 @@ class SerialTransport:
             _LOGGER.debug("Shake: got pairing key %s", pairing_key.hex())
             return pairing_key
         except asyncio.TimeoutError:
-            _LOGGER.warning("Shake handshake timed out — toilet may not respond to commands")
-            return None
+            raise PairingTimeout(
+                "Pairing handshake timed out — press the Bluetooth button on the toilet "
+                "within the timeout window, or pass a previously obtained pairing_key="
+            )
 
     def _on_notification(self, _: BleakGATTCharacteristic, data: bytearray) -> None:
         parsed = _parse_packet(bytes(data))

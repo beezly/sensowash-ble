@@ -19,5 +19,8 @@ dev = ["pytest", "pytest-asyncio", "black", "ruff"]
 [project.urls]
 Repository = "https://github.com/beezly/sensowash-ble"
 
+[tool.setuptools.package-data]
+sensowash = ["py.typed"]
+
 [tool.ruff]
 line-length = 100
