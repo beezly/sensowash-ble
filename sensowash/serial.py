@@ -213,23 +213,18 @@ class SerialTransport:
     async def _handshake(
         self,
         shake_char,
-        pairing_key_file: Optional[pathlib.Path] = None,
+        pairing_key: Optional[bytes] = None,
         timeout: float = 5.0,
-    ) -> None:
-        """Perform the BLE shake/pairing handshake."""
-        stored_key: Optional[bytes] = None
-        if pairing_key_file and pairing_key_file.exists():
-            try:
-                stored_key = bytes(json.loads(pairing_key_file.read_text()))
-                _LOGGER.debug("Loaded pairing key from %s", pairing_key_file)
-            except Exception:
-                stored_key = None
+    ) -> Optional[bytes]:
+        """Perform the BLE shake/pairing handshake.
 
-        if stored_key:
-            # Already paired: write key directly, no notification needed
-            _LOGGER.debug("Re-using stored pairing key")
-            await self._client.write_gatt_char(shake_char, stored_key, response=True)
-            return
+        If pairing_key is provided, write it directly (re-authentication).
+        Otherwise initiate a new pairing and return the issued key bytes.
+        """
+        if pairing_key:
+            _LOGGER.debug("Re-using provided pairing key")
+            await self._client.write_gatt_char(shake_char, pairing_key, response=True)
+            return pairing_key
 
         # First time: subscribe to shake notifications, write zeros, wait for key
         loop = asyncio.get_event_loop()
