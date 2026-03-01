@@ -41,7 +41,7 @@ from .models import (
     SeatHeatingSchedule, UvcSchedule,
     model_name_from_article,
 )
-from .serial import SerialTransport, SERVICE_UUID as SERIAL_SERVICE_UUID
+from .serial import SerialTransport, SERVICE_UUID as SERIAL_SERVICE_UUID, pair as serial_pair
 
 
 def _byte(value: int) -> bytes:
@@ -72,6 +72,7 @@ class SensoWashClient:
         address_or_device,
         timeout: float = 20.0,
         notification_cb: Optional[Callable[[str, bytes], None]] = None,
+        pairing_key: Optional[bytes] = None,
     ):
         self._address = address_or_device
         self._timeout = timeout
@@ -79,6 +80,7 @@ class SensoWashClient:
         self._client: Optional[BleakClient] = None
         self._char_cache: Dict[str, BleakGATTCharacteristic] = {}
         self._serial: Optional[SerialTransport] = None  # set if serial protocol detected
+        self._pairing_key = pairing_key
 
     @property
     def protocol(self) -> str:
@@ -123,7 +125,9 @@ class SensoWashClient:
                 self._client,
                 notification_cb=self._on_serial_notification,
             )
-            await self._serial.setup(pairing_key_file=__import__("pathlib").Path.home() / ".sensowash_pairing_key.json")
+            issued_key = await self._serial.setup(pairing_key=self._pairing_key)
+            if issued_key and not self._pairing_key:
+                self._pairing_key = issued_key
             await self._serial.sync_time()
         else:
             _LOGGER.info("GATT protocol detected")

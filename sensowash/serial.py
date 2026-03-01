@@ -116,6 +116,48 @@ def _parse_packet(data: bytes) -> Optional[tuple[int, bytes]]:
     return op_code, payload
 
 
+
+async def pair(address_or_device, timeout: float = 30.0) -> bytes:
+    """
+    Initiate a pairing handshake with a serial-protocol SensoWash toilet.
+
+    Connects to the device, sends zeros to the shake characteristic, and waits
+    for the toilet to respond with the pairing key (requires pressing the
+    physical Bluetooth button on the unit within ``timeout`` seconds).
+
+    Args:
+        address_or_device: Bluetooth MAC / CoreBluetooth UUID / BLEDevice.
+        timeout:           Seconds to wait for the toilet to respond.
+
+    Returns:
+        The pairing key as bytes. Store this and pass it as ``pairing_key``
+        to :class:`SerialTransport` (or :class:`SensoWashClient`) on future
+        connections.
+
+    Raises:
+        asyncio.TimeoutError: If the toilet does not respond in time.
+        RuntimeError: If the device does not expose the serial shake characteristic.
+    """
+    from bleak import BleakClient
+    async with BleakClient(address_or_device, timeout=20.0) as client:
+        char_map = {c.uuid.lower(): c for svc in client.services for c in svc.characteristics}
+        shake_char = char_map.get(CHAR_SHAKE)
+        if not shake_char:
+            raise RuntimeError(
+                "Shake characteristic not found — is this a serial-protocol SensoWash?"
+            )
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[bytes] = loop.create_future()
+
+        async def on_shake(_char, data: bytearray):
+            if not fut.done():
+                loop.call_soon_threadsafe(fut.set_result, bytes(data))
+
+        await client.start_notify(shake_char, on_shake)
+        await client.write_gatt_char(shake_char, bytes(4), response=True)
+        key = await asyncio.wait_for(fut, timeout=timeout)
+        return key
+
 class SerialTransport:
     """
     Low-level serial (UART-over-BLE) transport for older SensoWash models.
@@ -135,8 +177,16 @@ class SerialTransport:
         self._rx_char: Optional[BleakGATTCharacteristic] = None
         self._tx_char: Optional[BleakGATTCharacteristic] = None
 
-    async def setup(self, pairing_key_file: Optional[pathlib.Path] = None) -> bool:
+    async def setup(self, pairing_key: Optional[bytes] = None) -> bool:
         """Subscribe to RX notifications and perform shake handshake.
+
+        Args:
+            pairing_key: Previously obtained pairing key bytes. If None, the
+                         toilet will be asked to issue a new key (requires
+                         pressing the physical Bluetooth button on the unit).
+                         The issued key is returned by this method so the caller
+                         can persist it.
+
         Returns True if serial service found and handshake succeeded.
         """
         char_map = {
@@ -155,7 +205,7 @@ class SerialTransport:
         # On first connect: write [0,0,0,0] → toilet notifies with pairing key.
         # On subsequent connects: write the stored pairing key directly.
         if shake_char:
-            await self._handshake(shake_char, pairing_key_file)
+            self._last_pairing_key = await self._handshake(shake_char, pairing_key)
 
         _LOGGER.debug("Serial transport ready")
         return True
@@ -196,12 +246,10 @@ class SerialTransport:
         try:
             pairing_key = await asyncio.wait_for(fut, timeout=timeout)
             _LOGGER.debug("Shake: got pairing key %s", pairing_key.hex())
-            if pairing_key_file:
-                pairing_key_file.parent.mkdir(parents=True, exist_ok=True)
-                pairing_key_file.write_text(json.dumps(list(pairing_key)))
-                _LOGGER.debug("Pairing key saved to %s", pairing_key_file)
+            return pairing_key
         except asyncio.TimeoutError:
             _LOGGER.warning("Shake handshake timed out — toilet may not respond to commands")
+            return None
 
     def _on_notification(self, _: BleakGATTCharacteristic, data: bytearray) -> None:
         parsed = _parse_packet(bytes(data))

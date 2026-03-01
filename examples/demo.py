@@ -26,6 +26,36 @@ from sensowash.models import (
 )
 
 
+def _load_pairing_key() -> bytes | None:
+    """Load pairing key from SENSOWASH_KEY env var (hex string), or None."""
+    import os
+    val = os.environ.get("SENSOWASH_KEY", "").strip()
+    if val:
+        try:
+            key = bytes.fromhex(val)
+            print(f"  🔑 Using pairing key from SENSOWASH_KEY env var")
+            return key
+        except ValueError:
+            print(f"  ⚠️  SENSOWASH_KEY is not valid hex, ignoring")
+    return None
+
+
+async def demo_pair(address: str) -> None:
+    """Run the pairing handshake and display the key."""
+    print("\n── Pairing ─────────────────────────────────────────────")
+    print("  Press the Bluetooth button on your toilet within 30 seconds...")
+    try:
+        key = await SensoWashClient.pair(address, timeout=30.0)
+        key_hex = key.hex()
+        print(f"  ✅ Pairing key: {key_hex}")
+        print(f"  To use this key next time:\n")
+        print(f"    SENSOWASH_KEY={key_hex} python examples/demo.py {address}")
+    except TimeoutError:
+        print("  ❌ Timed out — did you press the button?")
+    except Exception as e:
+        print(f"  ❌ Error: {e}")
+
+
 async def discover_and_connect() -> str:
     print("🔍 Scanning for SensoWash devices (10s)...")
     devices = await SensoWashClient.discover(timeout=10.0)
@@ -42,13 +72,20 @@ async def discover_and_connect() -> str:
 async def main():
     address = sys.argv[1] if len(sys.argv) > 1 else await discover_and_connect()
 
+    # Allow pairing key to be supplied as env var or obtained interactively
+    pairing_key = _load_pairing_key()
+
     print(f"\n🔌 Connecting to {address}...")
 
     def on_notification(uuid: str, data: bytes):
         print(f"  📡 notification [{uuid[-8:]}] → {data.hex()}")
 
-    async with SensoWashClient(address, notification_cb=on_notification) as toilet:
-        print(f"✅ Connected! (protocol: {toilet.protocol})\n")
+    async with SensoWashClient(address, notification_cb=on_notification, pairing_key=pairing_key) as toilet:
+        print(f"✅ Connected! (protocol: {toilet.protocol})")
+        if toilet.pairing_key and not pairing_key:
+            key_hex = toilet.pairing_key.hex()
+            print(f"\n⚠️  New pairing key issued: {key_hex}")
+            print(f"   Store this and pass it as SENSOWASH_KEY={key_hex} next time.\n")
 
         # ── Device Info ────────────────────────────────────────────────────────
         print("── Device Information ──────────────────────────────────")
@@ -92,6 +129,7 @@ async def main():
         print("  s) View / set seat heating schedule")
         print("  u) View / set UVC disinfection schedule")
         print("  c) Re-display capabilities")
+        print("  p) Pair this device (press button on toilet)")
         print("  0) Stop / exit")
 
         choice = input("\nChoice: ").strip()
@@ -177,6 +215,9 @@ async def main():
 
         elif choice == "u":
             await demo_uvc_schedule(toilet)
+
+        elif choice == "p":
+            await demo_pair(address)
 
         elif choice == "0":
             print("  ⏹ Stopping...")
