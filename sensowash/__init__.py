@@ -19,6 +19,7 @@ from .models import (
     ErrorCode,
     ToiletState,
     DeviceInfo,
+    DeviceCapabilities,
     SeatScheduleWindow,
     SeatHeatingSchedule,
     UvcScheduleTime,

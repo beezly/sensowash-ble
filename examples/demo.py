@@ -55,6 +55,11 @@ async def main():
         info = await toilet.get_device_info()
         print(info)
 
+        # ── Capabilities ───────────────────────────────────────────────────────
+        print("\n── Capabilities ────────────────────────────────────────")
+        caps = await toilet.get_capabilities()
+        print(caps.summary())
+
         # ── Error Codes ────────────────────────────────────────────────────────
         print("\n── Error Codes ─────────────────────────────────────────")
         errors = await toilet.get_error_codes()
@@ -85,6 +90,7 @@ async def main():
         print("  9) Toggle mute")
         print("  s) View / set seat heating schedule")
         print("  u) View / set UVC disinfection schedule")
+        print("  c) Re-display capabilities")
         print("  0) Stop / exit")
 
         choice = input("\nChoice: ").strip()
@@ -156,6 +162,11 @@ async def main():
             new_state = not current if current is not None else True
             await toilet.set_mute(new_state)
             print(f"  🔇 Mute {'on' if new_state else 'off'}.")
+
+        elif choice == "c":
+            caps = await toilet.get_capabilities()
+            print("\n── Capabilities ────────────────────────────────────────")
+            print(caps.summary())
 
         elif choice == "s":
             await demo_seat_schedule(toilet)

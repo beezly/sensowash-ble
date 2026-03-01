@@ -218,6 +218,166 @@ class ErrorCode:
         return errors
 
 
+# ── Device Capabilities ────────────────────────────────────────────────────────
+
+# Article number → model name lookup (from VariantBleConstants.kt)
+_ARTICLE_NUMBERS: dict[str, str] = {
+    # SensoWash Classic EU
+    "613000012004300": "SensoWash Classic EU",
+    "613200012004300": "SensoWash Classic EU",
+    # SensoWash Classic NonEU
+    "613000012000304": "SensoWash Classic NonEU",
+    "613200012000304": "SensoWash Classic NonEU",
+    "613000012000300": "SensoWash Classic NonEU",
+    "613200012000300": "SensoWash Classic NonEU",
+    "613000011001301": "SensoWash Classic NonEU",
+    "613200011001301": "SensoWash Classic NonEU",
+    "613000011001300": "SensoWash Classic NonEU",
+    "613000011041300": "SensoWash Classic NonEU",
+    "613200011001300": "SensoWash Classic NonEU",
+    "613200011041300": "SensoWash Classic NonEU",
+    "613000012002300": "SensoWash Classic NonEU",
+    "613000012012300": "SensoWash Classic NonEU",
+    "613200012002300": "SensoWash Classic NonEU",
+    "613200012012300": "SensoWash Classic NonEU",
+    # SensoWash U
+    "622000012002300": "SensoWash U",
+    "622000012000300": "SensoWash U",
+    "622000011001301": "SensoWash U",
+    "622000011001300": "SensoWash U",
+    "622000012000304": "SensoWash U",
+    # SensoWash Starck F Pro EU
+    "650002012004300": "SensoWash Starck F Pro EU",
+    # SensoWash Starck F Pro NonEU
+    "612002012002300": "SensoWash Starck F Pro NonEU",
+    "612002012402300": "SensoWash Starck F Pro NonEU",
+    "612002011001300": "SensoWash Starck F Pro NonEU",
+    "612002012000300": "SensoWash Starck F Pro NonEU",
+    "612002011001301": "SensoWash Starck F Pro NonEU",
+    # SensoWash i Pro
+    "620002002402300": "SensoWash i Pro",
+    "620002012402300": "SensoWash i Pro",
+    "620002022402300": "SensoWash i Pro",
+    "620002032402300": "SensoWash i Pro",
+    "620002042402300": "SensoWash i Pro",
+    "620002001401300": "SensoWash i Pro",
+    "620002011401300": "SensoWash i Pro",
+    "620002001401301": "SensoWash i Pro",
+    "620002011401301": "SensoWash i Pro",
+    "620002002400300": "SensoWash i Pro",
+    "620002012400300": "SensoWash i Pro",
+}
+
+
+def model_name_from_article(article_number: str) -> str:
+    """Return the human-readable model name for an article number, or the raw number."""
+    return _ARTICLE_NUMBERS.get(article_number.strip(), article_number)
+
+
+@dataclass
+class DeviceCapabilities:
+    """
+    Capabilities detected from the live GATT profile of a connected toilet.
+
+    Populated by SensoWashClient.get_capabilities() — reflects which services and
+    characteristics are actually present on the physical device.  Use this to know
+    which features are safe to call before attempting them.
+
+    The model_name is resolved from the article number (Device Info Model Number
+    characteristic) against a known table of Duravit article numbers.
+    """
+    # Resolved from article number
+    model_name:               str  = "Unknown"
+    article_number:           str  = ""
+
+    # Core wash
+    rear_wash:                bool = False
+    lady_wash:                bool = False   # comfort wash flag present
+    water_flow_control:       bool = False
+    nozzle_position_control:  bool = False
+    water_temperature_control:bool = False
+
+    # Dryer
+    dryer:                    bool = False
+    dryer_temperature_control:bool = False
+    dryer_speed_control:      bool = False
+
+    # Flush
+    flush:                    bool = False
+    auto_flush:               bool = False
+    pre_flush:                bool = False
+
+    # Seat / lid
+    seat:                     bool = False
+    seat_auto:                bool = False
+    lid:                      bool = False
+    lid_auto:                 bool = False
+    seat_heating:             bool = False
+    seat_heating_schedule:    bool = False
+    proximity_detection:      bool = False
+    actual_seat_temperature:  bool = False
+
+    # Deodorization
+    deodorization:            bool = False
+    deodorization_auto:       bool = False
+
+    # Lighting
+    ambient_light:            bool = False
+    uvc_light:                bool = False
+    uvc_auto:                 bool = False
+    uvc_schedule:             bool = False
+
+    # Maintenance
+    descaling:                bool = False
+    water_hardness:           bool = False
+    mute:                     bool = False
+    error_codes:              bool = False
+
+    def summary(self) -> str:
+        """Return a human-readable capability summary."""
+        lines = [
+            f"Model:    {self.model_name}",
+            f"Article:  {self.article_number}" if self.article_number else "",
+            "",
+            "── Wash ──────────────────────────",
+            f"  Rear wash:               {'✓' if self.rear_wash else '✗'}",
+            f"  Lady wash:               {'✓' if self.lady_wash else '✗'}",
+            f"  Water flow control:      {'✓' if self.water_flow_control else '✗'}",
+            f"  Nozzle position:         {'✓' if self.nozzle_position_control else '✗'}",
+            f"  Water temperature:       {'✓' if self.water_temperature_control else '✗'}",
+            "── Dryer ─────────────────────────",
+            f"  Dryer:                   {'✓' if self.dryer else '✗'}",
+            f"  Dryer temperature:       {'✓' if self.dryer_temperature_control else '✗'}",
+            f"  Dryer speed:             {'✓' if self.dryer_speed_control else '✗'}",
+            "── Flush ─────────────────────────",
+            f"  Flush:                   {'✓' if self.flush else '✗'}",
+            f"  Auto flush:              {'✓' if self.auto_flush else '✗'}",
+            f"  Pre-flush:               {'✓' if self.pre_flush else '✗'}",
+            "── Seat & Lid ────────────────────",
+            f"  Seat:                    {'✓' if self.seat else '✗'}",
+            f"  Seat auto:               {'✓' if self.seat_auto else '✗'}",
+            f"  Lid:                     {'✓' if self.lid else '✗'}",
+            f"  Lid auto:                {'✓' if self.lid_auto else '✗'}",
+            f"  Seat heating:            {'✓' if self.seat_heating else '✗'}",
+            f"  Seat heating schedule:   {'✓' if self.seat_heating_schedule else '✗'}",
+            f"  Proximity detection:     {'✓' if self.proximity_detection else '✗'}",
+            f"  Actual seat temp sensor: {'✓' if self.actual_seat_temperature else '✗'}",
+            "── Comfort ───────────────────────",
+            f"  Deodorization:           {'✓' if self.deodorization else '✗'}",
+            f"  Auto deodorization:      {'✓' if self.deodorization_auto else '✗'}",
+            f"  Ambient light:           {'✓' if self.ambient_light else '✗'}",
+            f"  HygieneUV light:         {'✓' if self.uvc_light else '✗'}",
+            f"  HygieneUV auto:          {'✓' if self.uvc_auto else '✗'}",
+            f"  HygieneUV schedule:      {'✓' if self.uvc_schedule else '✗'}",
+            "── Maintenance ───────────────────",
+            f"  Descaling:               {'✓' if self.descaling else '✗'}",
+            f"  Water hardness setting:  {'✓' if self.water_hardness else '✗'}",
+            f"  Mute:                    {'✓' if self.mute else '✗'}",
+            f"  Error codes:             {'✓' if self.error_codes else '✗'}",
+        ]
+        return "\n".join(l for l in lines if l is not None)
+
+
 # ── Scheduling ─────────────────────────────────────────────────────────────────
 
 # Day-of-week constants matching the toilet's wire values (Mon=1 … Sun=7)

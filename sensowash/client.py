@@ -31,10 +31,11 @@ from bleak.backends.characteristic import BleakGATTCharacteristic
 
 from .constants import CHARACTERISTICS, DEVICE_NAME_PREFIXES
 from .models import (
-    DeviceInfo, ToiletState, ErrorCode,
+    DeviceInfo, ToiletState, ErrorCode, DeviceCapabilities,
     OnOff, WaterFlow, WaterTemperature, NozzlePosition,
     SeatTemperature, DryerTemperature, DryerSpeed, LidState, WaterHardness,
     SeatHeatingSchedule, UvcSchedule,
+    model_name_from_article,
 )
 
 
@@ -498,6 +499,86 @@ class SensoWashClient:
         await self.set_uvc_schedule(UvcSchedule.default())
 
     # ── Full state snapshot ────────────────────────────────────────────────────
+
+    # ── Capabilities ───────────────────────────────────────────────────────────
+
+    async def get_capabilities(self) -> DeviceCapabilities:
+        """
+        Probe the connected device's GATT profile and return a DeviceCapabilities
+        object describing exactly what this toilet supports.
+
+        Detection is based on which characteristics are present in the discovered
+        GATT services — no guessing from model name.  The model name is resolved
+        from the article number (Device Info Model Number characteristic) against
+        Duravit's known article number table.
+
+        Example::
+
+            async with SensoWashClient(address) as toilet:
+                caps = await toilet.get_capabilities()
+                print(caps.summary())
+                if caps.uvc_light:
+                    await toilet.set_uvc_light(True)
+        """
+        def has(key: str) -> bool:
+            uuid = CHARACTERISTICS.get(key, "").lower()
+            return uuid in self._char_cache
+
+        # Resolve model name from article number
+        article = ""
+        model = "Unknown"
+        raw = await self._read("MODEL_NUMBER")
+        if raw:
+            article = _read_str(raw)
+            model = model_name_from_article(article)
+
+        return DeviceCapabilities(
+            model_name=model,
+            article_number=article,
+
+            # Wash
+            rear_wash=has("WASH_STATE"),
+            lady_wash=has("COMFORT_WASH"),
+            water_flow_control=has("WATER_FLOW"),
+            nozzle_position_control=has("NOZZLE_POSITION"),
+            water_temperature_control=has("WATER_TEMPERATURE"),
+
+            # Dryer
+            dryer=has("DRYER_STATE"),
+            dryer_temperature_control=has("DRYER_TEMPERATURE"),
+            dryer_speed_control=has("DRYER_SPEED"),
+
+            # Flush
+            flush=has("FLUSH_STATE"),
+            auto_flush=has("FLUSH_AUTOMATIC"),
+            pre_flush=has("FLUSH_PRE_FLUSH"),
+
+            # Seat / lid
+            seat=has("SEAT_STATE"),
+            seat_auto=has("SEAT_AUTOMATIC"),
+            lid=has("LID_STATE"),
+            lid_auto=has("LID_AUTOMATIC_STATE"),
+            seat_heating=has("SEAT_TEMPERATURE"),
+            seat_heating_schedule=has("SEAT_TEMPERATURE_PROGRAMMED"),
+            proximity_detection=has("SEAT_PROXIMITY"),
+            actual_seat_temperature=has("SEAT_ACTUAL_TEMP"),
+
+            # Deodorization
+            deodorization=has("DEODORIZATION_STATE"),
+            deodorization_auto=has("DEODORIZATION_AUTO"),
+
+            # Lighting
+            ambient_light=has("AMBIENT_LIGHT_STATE"),
+            uvc_light=has("UVC_STATE"),
+            uvc_auto=has("UVC_AUTOMATIC"),
+            uvc_schedule=has("UVC_PROGRAMMED"),
+
+            # Maintenance
+            descaling=has("DESCALING_STATE"),
+            water_hardness=has("WATER_HARDNESS"),
+            mute=has("MUTE"),
+            error_codes=has("ERROR_CODES"),
+        )
 
     async def get_full_state(self) -> Dict[str, Any]:
         """
