@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""
+SensoWash BLE Demo
+==================
+Demonstrates the main features of the sensowash Python library.
+
+Usage:
+    # Auto-discover and connect to the first SensoWash found:
+    python demo.py
+
+    # Connect to a specific device by MAC address:
+    python demo.py AA:BB:CC:DD:EE:FF
+
+    # On macOS, use the CoreBluetooth UUID instead of MAC:
+    python demo.py 12345678-ABCD-1234-ABCD-1234567890AB
+"""
+
+import asyncio
+import sys
+from sensowash import SensoWashClient
+from sensowash.models import (
+    WaterFlow, WaterTemperature, NozzlePosition,
+    SeatTemperature, DryerTemperature, DryerSpeed,
+)
+
+
+async def discover_and_connect() -> str:
+    print("🔍 Scanning for SensoWash devices (10s)...")
+    devices = await SensoWashClient.discover(timeout=10.0)
+    if not devices:
+        print("❌ No SensoWash devices found.")
+        sys.exit(1)
+    print(f"\nFound {len(devices)} device(s):")
+    for i, d in enumerate(devices):
+        print(f"  [{i}] {d.name}  ({d.address})")
+    choice = 0 if len(devices) == 1 else int(input("\nSelect device index: "))
+    return devices[choice].address
+
+
+async def main():
+    address = sys.argv[1] if len(sys.argv) > 1 else await discover_and_connect()
+
+    print(f"\n🔌 Connecting to {address}...")
+
+    def on_notification(uuid: str, data: bytes):
+        print(f"  📡 notification [{uuid[-8:]}] → {data.hex()}")
+
+    async with SensoWashClient(address, notification_cb=on_notification) as toilet:
+        print("✅ Connected!\n")
+
+        # ── Device Info ────────────────────────────────────────────────────────
+        print("── Device Information ──────────────────────────────────")
+        info = await toilet.get_device_info()
+        print(info)
+
+        # ── Error Codes ────────────────────────────────────────────────────────
+        print("\n── Error Codes ─────────────────────────────────────────")
+        errors = await toilet.get_error_codes()
+        if errors:
+            for e in errors:
+                print(f"  ⚠️  {e}")
+        else:
+            print("  ✅ No active errors")
+
+        # ── Full State Snapshot ────────────────────────────────────────────────
+        print("\n── Current State ───────────────────────────────────────")
+        state = await toilet.get_full_state()
+        for key, val in state.items():
+            if key == "errors":
+                continue
+            print(f"  {key:<22} = {val}")
+
+        # ── Interactive menu ───────────────────────────────────────────────────
+        print("\n── What would you like to do? ──────────────────────────")
+        print("  1) Start rear wash (medium flow, temp 2, centre nozzle)")
+        print("  2) Start lady wash (medium flow, temp 2, centre nozzle)")
+        print("  3) Start dryer")
+        print("  4) Flush")
+        print("  5) Open lid")
+        print("  6) Close lid")
+        print("  7) Set seat temperature")
+        print("  8) Toggle ambient light")
+        print("  9) Toggle mute")
+        print("  0) Stop / exit")
+
+        choice = input("\nChoice: ").strip()
+
+        if choice == "1":
+            print("🚿 Starting rear wash...")
+            await toilet.start_rear_wash(
+                water_flow=WaterFlow.MEDIUM,
+                water_temperature=WaterTemperature.TEMP_2,
+                nozzle_position=NozzlePosition.POSITION_2,
+            )
+            print("  Running for 20s. Press Ctrl+C to stop early.")
+            await asyncio.sleep(20)
+            await toilet.stop()
+            print("  ⏹ Stopped.")
+
+        elif choice == "2":
+            print("🚿 Starting lady wash...")
+            await toilet.start_lady_wash(
+                water_flow=WaterFlow.MEDIUM,
+                water_temperature=WaterTemperature.TEMP_2,
+                nozzle_position=NozzlePosition.POSITION_2,
+            )
+            await asyncio.sleep(20)
+            await toilet.stop()
+            print("  ⏹ Stopped.")
+
+        elif choice == "3":
+            print("💨 Starting dryer...")
+            await toilet.start_dryer(
+                temperature=DryerTemperature.TEMP_2,
+                speed=DryerSpeed.SPEED_0,
+            )
+            await asyncio.sleep(30)
+            await toilet.stop_dryer()
+            print("  ⏹ Dryer stopped.")
+
+        elif choice == "4":
+            print("🌊 Flushing...")
+            await toilet.flush()
+
+        elif choice == "5":
+            print("🚪 Opening lid...")
+            await toilet.open_lid()
+
+        elif choice == "6":
+            print("🚪 Closing lid...")
+            await toilet.close_lid()
+
+        elif choice == "7":
+            levels = {
+                "0": SeatTemperature.OFF,
+                "1": SeatTemperature.TEMP_1,
+                "2": SeatTemperature.TEMP_2,
+                "3": SeatTemperature.TEMP_3,
+            }
+            lvl = input("  Seat temperature (0=off, 1-3): ").strip()
+            await toilet.set_seat_temperature(levels.get(lvl, SeatTemperature.TEMP_1))
+            print("  🌡 Set.")
+
+        elif choice == "8":
+            current = await toilet.get_ambient_light()
+            new_state = not current if current is not None else True
+            await toilet.set_ambient_light(new_state)
+            print(f"  💡 Ambient light {'on' if new_state else 'off'}.")
+
+        elif choice == "9":
+            current = await toilet.get_mute()
+            new_state = not current if current is not None else True
+            await toilet.set_mute(new_state)
+            print(f"  🔇 Mute {'on' if new_state else 'off'}.")
+
+        elif choice == "0":
+            print("  ⏹ Stopping...")
+            await toilet.stop()
+
+        print("\n👋 Done. Disconnecting.")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n⚠️  Interrupted.")

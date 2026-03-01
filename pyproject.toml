@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "sensowash"
+version = "0.1.0"
+description = "Python BLE library for Duravit SensoWash smart toilets"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "bleak>=0.21",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "black", "ruff"]
+
+[project.urls]
+Repository = "https://github.com/beezly/sensowash-ble"
+
+[tool.ruff]
+line-length = 100
