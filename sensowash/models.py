@@ -255,6 +255,32 @@ class ErrorCode:
         return errors
 
 
+# ── Descaling state ────────────────────────────────────────────────────────────
+
+@dataclass
+class DescalingState:
+    """Decoded from the 5-byte descaling state response (opcode 0x65).
+    counter_a/b are big-endian uint16s - exact meaning TBD (likely elapsed/remaining)."""
+    status:    DescalingStatus
+    counter_a: int = 0
+    counter_b: int = 0
+
+    @classmethod
+    def from_bytes(cls, data: bytes):
+        if not data:
+            return None
+        try:
+            status = DescalingStatus(data[0])
+        except ValueError:
+            return None
+        a = (data[1] * 256 + data[2]) if len(data) > 2 else 0
+        b = (data[3] * 256 + data[4]) if len(data) > 4 else 0
+        return cls(status=status, counter_a=a, counter_b=b)
+
+    def __str__(self):
+        return f"DescalingState({self.status.name}, a={self.counter_a}, b={self.counter_b})"
+
+
 # ── Device Capabilities ────────────────────────────────────────────────────────
 
 # Article number → model name lookup (from VariantBleConstants.kt)
