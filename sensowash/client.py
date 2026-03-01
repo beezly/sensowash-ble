@@ -62,10 +62,34 @@ class SensoWashClient:
     Async context-manager client for a SensoWash BLE device.
 
     Args:
-        address_or_device: Bluetooth MAC address (str) or BLEDevice.
-        timeout:           Connection timeout in seconds.
-        notification_cb:   Optional callback(characteristic_uuid, data) for BLE
-                           notifications from the toilet.
+        address_or_device:   Bluetooth MAC address (str) or BLEDevice.
+        timeout:             Connection timeout in seconds.
+        notification_cb:     Optional callback(characteristic_uuid, data) for BLE
+                             notifications from the toilet.
+        pairing_key:         Pairing key bytes for serial-protocol devices.
+        bleak_client_factory: Optional async callable that accepts (address_or_device,
+                             disconnected_callback, timeout) and returns a **connected**
+                             BleakClient.  Use this to plug in
+                             ``bleak_retry_connector.establish_connection`` (recommended
+                             when connecting through Home Assistant Bluetooth proxies).
+
+                             Example (Home Assistant coordinator)::
+
+                                 from bleak_retry_connector import (
+                                     establish_connection,
+                                     BleakClientWithServiceCache,
+                                 )
+
+                                 async def factory(device, disconnected_cb, timeout):
+                                     return await establish_connection(
+                                         BleakClientWithServiceCache,
+                                         device,
+                                         device.name or str(device.address),
+                                         disconnected_callback=disconnected_cb,
+                                         max_attempts=3,
+                                     )
+
+                                 client = SensoWashClient(ble_device, bleak_client_factory=factory)
     """
 
     def __init__(
@@ -74,10 +98,14 @@ class SensoWashClient:
         timeout: float = 20.0,
         notification_cb: Optional[Callable[[str, bytes], None]] = None,
         pairing_key: Optional[bytes] = None,
+        bleak_client_factory: Optional[
+            Callable[..., Any]
+        ] = None,
     ):
         self._address = address_or_device
         self._timeout = timeout
         self._user_cb = notification_cb
+        self._bleak_client_factory = bleak_client_factory
         self._client: Optional[BleakClient] = None
         self._char_cache: Dict[str, BleakGATTCharacteristic] = {}
         self._serial: Optional[SerialTransport] = None  # set if serial protocol detected
@@ -97,6 +125,13 @@ class SensoWashClient:
     async def __aexit__(self, *_) -> None:
         await self.disconnect()
 
+    def _on_disconnect(self, _client: Any = None) -> None:
+        """Called by bleak when the BLE connection drops unexpectedly."""
+        _LOGGER.debug("Disconnected from %s", self._address)
+        # Notify user callback with a synthetic event so callers can react
+        if self._user_cb:
+            self._user_cb("disconnected", b"")
+
     # ── Connection ─────────────────────────────────────────────────────────────
 
     async def connect(self) -> None:
@@ -109,9 +144,22 @@ class SensoWashClient:
         services are present after connection.
         """
         from bleak.exc import BleakError
-        self._client = BleakClient(self._address, timeout=self._timeout)
         try:
-            await self._client.connect()
+            if self._bleak_client_factory:
+                # Caller supplied a factory (e.g. bleak_retry_connector.establish_connection).
+                # The factory is expected to return an already-connected BleakClient.
+                self._client = await self._bleak_client_factory(
+                    self._address,
+                    self._on_disconnect,
+                    self._timeout,
+                )
+            else:
+                self._client = BleakClient(
+                    self._address,
+                    timeout=self._timeout,
+                    disconnected_callback=self._on_disconnect,
+                )
+                await self._client.connect()
         except BleakError as exc:
             raise ConnectionError(f"Failed to connect to toilet: {exc}") from exc
         self._char_cache = {}
