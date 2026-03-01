@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sensowash"
+name = "sensowash-ble"
 version = "0.1.0"
 description = "Python BLE library for Duravit SensoWash smart toilets"
 readme = "README.md"
