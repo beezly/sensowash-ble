@@ -3,18 +3,18 @@
 Python BLE library for **Duravit SensoWash** smart toilets.
 
 Reverse-engineered from the official Android app (`com.duravit.sensowash` v2.1.19).  
-Supports the BLE GATT protocol used by modern SensoWash devices:
+Supports both the modern GATT protocol and the older UART-over-BLE serial protocol,
+auto-detected on connect.
 
-| Model name | BLE prefix |
-|---|---|
-| SensoWash Classic | `SensoWash c` |
-| SensoWash U | `SensoWash u` |
-| SensoWash Starck F Pro | `SensoWash s` |
-| SensoWash i Pro | `SensoWash i` |
-| DuraSystem | `DuraSystem` |
-
-> **Note:** Older serial-protocol devices (Starck Plus/Lite, i Plus/Lite China/USA) use a
-> different UART-over-BLE protocol and are not currently supported.
+| Model | Protocol | BLE name |
+|---|---|---|
+| SensoWash Classic | GATT | `SensoWash c…` |
+| SensoWash U | GATT | `SensoWash u…` |
+| SensoWash Starck F Pro | GATT | `SensoWash s…` |
+| SensoWash i Pro | GATT | `SensoWash i…` |
+| DuraSystem | GATT | `DuraSystem…` |
+| Starck F Lite / Plus | Serial | `DURAVIT_BT` |
+| i Lite / Plus | Serial | `DURAVIT_BT` |
 
 ---
 
@@ -27,7 +27,7 @@ Supports the BLE GATT protocol used by modern SensoWash devices:
 
 ```bash
 pip install bleak
-pip install .   # or: pip install -e .
+pip install -e .
 ```
 
 ---
@@ -40,27 +40,10 @@ from sensowash import SensoWashClient
 from sensowash.models import WaterFlow, WaterTemperature, NozzlePosition
 
 async def main():
-    # Discover nearby devices
-    devices = await SensoWashClient.discover()
-    print(devices)
-
-    # Connect by MAC address (Linux) or CoreBluetooth UUID (macOS)
     async with SensoWashClient("AA:BB:CC:DD:EE:FF") as toilet:
-
-        # Device info
         info = await toilet.get_device_info()
         print(info)
 
-        # Check for faults
-        errors = await toilet.get_error_codes()
-        for e in errors:
-            print(e)
-
-        # Full state snapshot
-        state = await toilet.get_full_state()
-        print(state)
-
-        # Start rear wash
         await toilet.start_rear_wash(
             water_flow=WaterFlow.MEDIUM,
             water_temperature=WaterTemperature.TEMP_2,
@@ -72,24 +55,67 @@ async def main():
 asyncio.run(main())
 ```
 
+> **macOS:** Use the CoreBluetooth UUID instead of a MAC address —
+> find it via Bluetooth settings or `SensoWashClient.discover()`.
+
+---
+
+## Pairing (serial-protocol devices only)
+
+Older serial-protocol devices (Starck F/i Lite/Plus) require a one-time pairing handshake.
+Press the physical Bluetooth button on the toilet when prompted.
+
+```python
+import asyncio
+from sensowash import SensoWashClient
+
+async def main():
+    address = "AA:BB:CC:DD:EE:FF"  # or CoreBluetooth UUID on macOS
+
+    # One-time pairing — press button on toilet within 30 seconds
+    key = await SensoWashClient.pair(address)
+    print(f"Pairing key: {key.hex()}")
+    # → store this key somewhere (env var, config file, etc.)
+
+    # Subsequent connections — supply the stored key
+    async with SensoWashClient(address, pairing_key=key) as toilet:
+        state = await toilet.get_full_state()
+        print(state)
+
+asyncio.run(main())
+```
+
+The library does **not** persist the key itself — that is left to the caller.
+If you connect without a key and the toilet issues one, it is available on
+`toilet.pairing_key` after connect.
+
 ---
 
 ## API Reference
 
-### `SensoWashClient(address, timeout=20.0, notification_cb=None)`
+### `SensoWashClient(address, timeout=20.0, notification_cb=None, pairing_key=None)`
 
-Async context manager. `notification_cb(uuid: str, data: bytes)` is called for every
-BLE notification received from the toilet.
+Async context manager. `address` is a MAC address string (Linux/Windows) or
+CoreBluetooth UUID (macOS). `notification_cb(uuid, data)` is called for every
+BLE notification. `pairing_key` is required for serial-protocol devices after
+the initial pairing.
+
+| Property | Description |
+|---|---|
+| `toilet.protocol` | `'gatt'` or `'serial'` — detected on connect |
+| `toilet.pairing_key` | Active pairing key bytes, or `None` (serial devices only) |
 
 #### Discovery
 | Method | Description |
 |---|---|
 | `SensoWashClient.discover(timeout=10.0)` | Scan and return list of `BLEDevice` |
+| `SensoWashClient.pair(address, timeout=30.0)` | One-time pairing → returns key `bytes` |
 
 #### Device Info & State
 | Method | Returns |
 |---|---|
 | `get_device_info()` | `DeviceInfo` (manufacturer, model, serial, firmware) |
+| `get_capabilities()` | `DeviceCapabilities` — which features this unit supports |
 | `get_full_state()` | `dict` snapshot of all readable characteristics |
 | `get_error_codes()` | `list[ErrorCode]` |
 
@@ -102,15 +128,12 @@ BLE notification received from the toilet.
 | `set_water_flow(flow)` | `WaterFlow.LOW / MEDIUM / HIGH` |
 | `set_water_temperature(temp)` | `WaterTemperature.TEMP_0–3` |
 | `set_nozzle_position(pos)` | `NozzlePosition.POSITION_0–4` |
-| `get_wash_state()` | `OnOff` |
 
 #### Dryer
 | Method | Description |
 |---|---|
 | `start_dryer(temperature, speed)` | Start warm air dryer |
 | `stop_dryer()` | Stop dryer |
-| `set_dryer_temperature(temp)` | `DryerTemperature.TEMP_0–3` |
-| `set_dryer_speed(speed)` | `DryerSpeed.SPEED_0 / SPEED_1` |
 
 #### Flush
 | Method | Description |
@@ -128,17 +151,11 @@ BLE notification received from the toilet.
 | `set_seat_temperature(temp)` | `SeatTemperature.OFF / TEMP_1–3` |
 | `get_actual_seat_temperature()` | Raw measured temp (int) |
 | `set_proximity_detection(enabled)` | Proximity sensor on/off |
-| `set_seat_auto(enabled)` | Auto seat lowering |
-
-#### Deodorization
-| Method | Description |
-|---|---|
-| `set_deodorization(enabled)` | Deodorization on/off |
-| `set_deodorization_auto(enabled)` | Automatic deodorization |
 
 #### Lighting
 | Method | Description |
 |---|---|
+| `get_ambient_light()` | Current ambient light state (`bool`) |
 | `set_ambient_light(enabled)` | Ambient/night light on/off |
 | `set_uvc_light(enabled)` | HygieneUV light on/off |
 | `set_uvc_auto(enabled)` | Automatic UVC cycles |
@@ -146,43 +163,41 @@ BLE notification received from the toilet.
 #### Maintenance
 | Method | Description |
 |---|---|
-| `get_error_codes()` | List active fault codes |
+| `get_mute()` | Current mute state (`bool`) |
 | `set_mute(muted)` | Mute/unmute beep tones |
 | `set_water_hardness(hardness)` | `WaterHardness.LEVEL_0–4` |
-| `get_descaling_state()` | Raw descaling state bytes |
+| `get_error_codes()` | List active fault codes |
 
 #### Seat Heating Schedule
 | Method | Description |
 |---|---|
-| `get_seat_heating_schedule()` | Read the current seat heating schedule → `SeatHeatingSchedule` |
+| `get_seat_heating_schedule()` | Read schedule → `SeatHeatingSchedule` |
 | `set_seat_heating_schedule(schedule)` | Write a new schedule |
 | `clear_seat_heating_schedule()` | Remove all scheduled windows |
 
 #### UVC Disinfection Schedule
 | Method | Description |
 |---|---|
-| `get_uvc_schedule()` | Read the current UVC schedule → `UvcSchedule` |
+| `get_uvc_schedule()` | Read schedule → `UvcSchedule` |
 | `set_uvc_schedule(schedule)` | Write a new schedule |
 | `set_uvc_schedule_default()` | Restore factory default (02:00 + 03:00 daily) |
 
 ---
 
----
-
 ## Scheduling
 
-The toilet runs two autonomous schedules — BLE is only needed to read or set them.
-The client syncs the onboard RTC on every connect automatically.
+The toilet runs schedules autonomously using its onboard RTC. BLE is only needed
+to read or update them. The client syncs the RTC on every connect automatically.
 
 ### Seat Heating Schedule
 
 ```python
-from sensowash import (
+from sensowash import SensoWashClient
+from sensowash.models import (
     SeatHeatingSchedule, SeatScheduleWindow, SeatTemperature,
     ALL_WEEKDAYS, ALL_WEEKEND,
 )
 
-# Define a schedule with two windows
 schedule = SeatHeatingSchedule(
     enabled=True,
     temperature=SeatTemperature.TEMP_2,
@@ -190,55 +205,48 @@ schedule = SeatHeatingSchedule(
         SeatScheduleWindow(
             from_hour=6, from_minute=30,
             to_hour=8,   to_minute=0,
-            days=ALL_WEEKDAYS,          # Mon–Fri
+            days=ALL_WEEKDAYS,    # Mon–Fri
         ),
         SeatScheduleWindow(
             from_hour=8, from_minute=0,
             to_hour=9,   to_minute=30,
-            days=ALL_WEEKEND,           # Sat–Sun
+            days=ALL_WEEKEND,     # Sat–Sun
         ),
     ],
 )
 
-async with SensoWashClient("AA:BB:CC:DD:EE:FF") as toilet:
+async with SensoWashClient(address, pairing_key=key) as toilet:
     await toilet.set_seat_heating_schedule(schedule)
-
-    # Read back
     current = await toilet.get_seat_heating_schedule()
     for w in current.windows:
-        print(w)   # → "06:30–08:00 [MonTueWedThuFri]"
+        print(w)  # → "06:30–08:00 [MonTueWedThuFri]"
 ```
-
-**Wire format:** 7 bytes per (day × window) entry — `[day][fromH][fromM][0x00][durLo][durHi][temp]`.
-Duration is in minutes, little-endian. A 5-day window writes 5 entries.
 
 ### UVC Disinfection Schedule
 
 ```python
-from sensowash import UvcSchedule, UvcScheduleTime
+from sensowash.models import UvcSchedule, UvcScheduleTime
 
-# Two daily disinfection runs
 schedule = UvcSchedule(triggers=[
-    UvcScheduleTime(hour=2, minute=0),   # 02:00
-    UvcScheduleTime(hour=4, minute=0),   # 04:00
+    UvcScheduleTime(hour=2, minute=0),
+    UvcScheduleTime(hour=4, minute=0),
 ])
 
-async with SensoWashClient("AA:BB:CC:DD:EE:FF") as toilet:
+async with SensoWashClient(address) as toilet:
     await toilet.set_uvc_schedule(schedule)
-
-    # Restore factory default (02:00 + 03:00)
-    await toilet.set_uvc_schedule_default()
+    await toilet.set_uvc_schedule_default()  # restore 02:00 + 03:00
 ```
 
-**Wire format:** 3 bytes per trigger — `[hour][minute][0x00]`.
-Each cycle runs for exactly **20 minutes** (fixed by firmware). Triggers fire **daily** —
+Each UVC cycle runs for exactly **20 minutes** (firmware fixed). Triggers fire daily —
 there is no per-weekday control for UVC.
 
 ### Day constants
 
 ```python
-from sensowash import MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY
-from sensowash import ALL_WEEKDAYS, ALL_WEEKEND, ALL_DAYS
+from sensowash.models import (
+    MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY,
+    ALL_WEEKDAYS, ALL_WEEKEND, ALL_DAYS,
+)
 ```
 
 ---
@@ -263,62 +271,62 @@ from sensowash.models import (
 
 ## Error Codes
 
-The `ERROR_CODES` characteristic returns a bitmask. Each active error is decoded
-into an `ErrorCode` object:
-
 ```python
 errors = await toilet.get_error_codes()
 for e in errors:
-    print(f"[{e.code}] {e.category}: {e.title}")
-    print(f"  Service ref: {e.service_code}")
-    print(f"  Action: {e.action}")
+    print(f"[{e.code}] {e.category}: {e.title} — {e.action}")
 ```
 
-| Code | Service Ref | Category | Meaning |
-|---|---|---|---|
-| 1–3 | 721.x | Power Supply | Power fault — cut power, call installer |
-| 4, 9–13 | 725.x | Seat Heating | Seat heating fault — cut power, call installer |
-| 17 | 735.1 | Water Supply | Water supply fault — close stop valve |
-| 18 | 735.2 | Water Supply | Low pressure — clean filter/check tubes |
-| 19–20 | 735.x | Water Supply | Water supply fault — close stop valve |
-| 25–30 | 726.x | Water Temperature | Shower water temp fault — close stop valve |
-| 33–35 | 727.x | Warm Air Dryer | Dryer fault — cut power, call installer |
-| 41–42 | 722.x | Gearbox | Seat/lid gear fault — call installer |
-| 49 | 746.1 | HygieneUV | UVC fan abnormal |
-| 50 | 746.2 | HygieneUV | UVC circuit voltage fault |
-| 51 | 746.3 | HygieneUV | UVC comms failure |
-| 65 | 738.3 | Flush System | Flush fault — cut power, close stop valve |
-
----
-
-## BLE Protocol Notes
-
-- **Transport:** BLE GATT over Bluetooth Low Energy
-- **Bonding:** Required. Pair your device before connecting.
-- **MTU:** The app requests 512 bytes; bleak handles this automatically.
-- **Time sync:** The client writes current time to the Current Time Service on connect
-  (required for scheduling features).
-- **Notifications:** The client subscribes to all notifiable characteristics on connect.
-  Pass `notification_cb` to receive real-time state changes.
-- **Wire format:** Nearly all values are a single unsigned byte matching the enum integer.
-
-Full GATT service/characteristic UUID reference: see [`sensowash/constants.py`](sensowash/constants.py)  
-Full protocol documentation: [`docs/PROTOCOL.md`](docs/PROTOCOL.md)
+| Code | Category | Meaning |
+|---|---|---|
+| 1–3 | Power Supply | Power fault — cut power, call installer |
+| 4, 9–13 | Seat Heating | Seat heating fault — cut power, call installer |
+| 17–20 | Water Supply | Water fault — close stop valve |
+| 25–30 | Water Temperature | Shower water temp fault — close stop valve |
+| 33–35 | Warm Air Dryer | Dryer fault — cut power, call installer |
+| 41–42 | Gearbox | Seat/lid gear fault — call installer |
+| 49–51 | HygieneUV | UVC fan/circuit/comms fault |
+| 65 | Flush System | Flush fault — cut power, close stop valve |
 
 ---
 
 ## Examples
 
 ```bash
-# Interactive demo
+# Interactive demo (auto-discovers or pass address)
 python examples/demo.py
-
-# Connect to a specific device
 python examples/demo.py AA:BB:CC:DD:EE:FF
+
+# Supply pairing key via env var (serial-protocol devices)
+SENSOWASH_KEY=aabbccdd python examples/demo.py AA:BB:CC:DD:EE:FF
 
 # Live notification monitor
 python examples/monitor.py AA:BB:CC:DD:EE:FF
 ```
+
+The demo includes:
+- Device info, capabilities, error codes, full state snapshot
+- Interactive wash / dryer / flush / lid / seat temp controls
+- Ambient light blink test (5× toggle, restores original state)
+- Seat heating schedule viewer/editor
+- UVC schedule viewer/editor
+- Pairing flow for serial-protocol devices
+
+---
+
+## Protocol Notes
+
+- **Auto-detection:** The client checks for the serial UART service UUID on connect;
+  if absent it falls back to GATT.
+- **Time sync:** RTC is synced on every connect (required for scheduling).
+- **Notifications:** All notifiable GATT characteristics are subscribed on connect.
+  Pass `notification_cb` to receive real-time state changes.
+- **Serial protocol:** Older devices use a UART-over-BLE serial framing layer with
+  a proprietary handshake. The pairing key is a 4-byte secret exchanged once via
+  the shake characteristic.
+
+Full protocol documentation (GATT UUIDs, serial op codes, wire formats):  
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md)
 
 ---
 
