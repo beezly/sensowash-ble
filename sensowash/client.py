@@ -38,6 +38,8 @@ from .models import (
     DeviceInfo, ToiletState, ErrorCode, DeviceCapabilities,
     OnOff, WaterFlow, WaterTemperature, NozzlePosition,
     SeatTemperature, DryerTemperature, DryerSpeed, LidState, WaterHardness,
+    ProximityState, LightState, DeodorizationDelay, TankDrainage,
+    DescalingStatus, DescalingState,
     SeatHeatingSchedule, UvcSchedule,
     model_name_from_article,
 )
@@ -465,12 +467,18 @@ class SensoWashClient:
     # ── Flush ──────────────────────────────────────────────────────────────────
 
     async def flush(self) -> None:
-        """Trigger a manual flush."""
+        """Trigger a full flush."""
         if self._serial:
             from .serial import OP_FULL_FLUSH
             await self._serial.send(OP_FULL_FLUSH)
         else:
             await self._write("FLUSH_STATE", _byte(0x01))
+
+    async def eco_flush(self) -> None:
+        """Trigger an eco (reduced water) flush. Serial protocol only."""
+        if self._serial:
+            from .serial import OP_ECO_FLUSH
+            await self._serial.send(OP_ECO_FLUSH)
 
     async def set_auto_flush(self, enabled: bool) -> None:
         if self._serial:
@@ -527,25 +535,28 @@ class SensoWashClient:
         """Read the actual measured seat temperature (raw value, 0–255)."""
         return await self._read_byte("SEAT_ACTUAL_TEMP")
 
-    async def set_proximity_detection(self, enabled: bool) -> None:
+    async def set_proximity_detection(self, state: ProximityState = ProximityState.MEDIUM) -> None:
+        """Set proximity sensor sensitivity (NEAR/MEDIUM/FAR)."""
         if self._serial:
-            from .serial import OP_HUMAN_SENSING
-            await self._serial.send(OP_HUMAN_SENSING, bytes([1 if enabled else 0]))
+            from .serial import OP_HUMAN_SENSING_DISTANCE
+            await self._serial.send(OP_HUMAN_SENSING_DISTANCE, bytes([state.value]))
         else:
-            await self._write("SEAT_PROXIMITY", _byte(OnOff.ON if enabled else OnOff.OFF))
+            await self._write("SEAT_PROXIMITY", _byte(OnOff.ON if state != ProximityState.NEAR else OnOff.OFF))
 
-    async def get_proximity_detection(self) -> Optional[bool]:
+    async def get_proximity_detection(self) -> Optional[ProximityState]:
         if self._serial:
-            return None  # not individually readable on serial; use get_function_config
+            return None
         v = await self._read_byte("SEAT_PROXIMITY")
-        return bool(v) if v is not None else None
+        if v is None: return None
+        try: return ProximityState(v)
+        except ValueError: return ProximityState.MEDIUM
 
     async def set_seat_auto(self, enabled: bool) -> None:
         """Enable/disable automatic seat lowering."""
         if self._serial:
             from .serial import OP_AUTO_LID_SEAT_OPEN, OP_AUTO_LID_SEAT_CLOSE
             op = OP_AUTO_LID_SEAT_OPEN if enabled else OP_AUTO_LID_SEAT_CLOSE
-            await self._serial.send(op, bytes([1]))
+            await self._serial.send(op, bytes([1 if enabled else 0]))
         else:
             await self._write("SEAT_AUTOMATIC", _byte(OnOff.ON if enabled else OnOff.OFF))
 
@@ -565,24 +576,37 @@ class SensoWashClient:
         else:
             await self._write("DEODORIZATION_AUTO", _byte(OnOff.ON if enabled else OnOff.OFF))
 
+    async def set_deodorization_delay(self, delay: DeodorizationDelay) -> None:
+        """Set deodorization activation delay (OFF/DELAY_1/DELAY_2)."""
+        if self._serial:
+            from .serial import OP_AUTO_DEODORIZATION_DELAY
+            await self._serial.send(OP_AUTO_DEODORIZATION_DELAY, bytes([delay.value]))
+        else:
+            await self._write("DEODORIZATION_DELAY", _byte(delay.value))
+
     async def get_deodorization_state(self) -> Optional[bool]:
         v = await self._read_byte("DEODORIZATION_STATE")
         return bool(v) if v is not None else None
 
     # ── Ambient Light ──────────────────────────────────────────────────────────
 
-    async def set_ambient_light(self, enabled: bool) -> None:
+    async def set_night_light(self, state: LightState = LightState.AUTO) -> None:
+        """Set night light mode (OFF/ON/AUTO)."""
         if self._serial:
             from .serial import OP_NIGHT_LIGHT
-            await self._serial.send(OP_NIGHT_LIGHT, bytes([1 if enabled else 0]))
+            await self._serial.send(OP_NIGHT_LIGHT, bytes([state.value]))
         else:
-            await self._write("AMBIENT_LIGHT_STATE", _byte(OnOff.ON if enabled else OnOff.OFF))
+            await self._write("AMBIENT_LIGHT_STATE", _byte(OnOff.ON if state != LightState.OFF else OnOff.OFF))
 
-    async def get_ambient_light(self) -> Optional[bool]:
-        if self._serial:
-            return None  # not individually readable on serial
+    async def set_ambient_light(self, enabled: bool) -> None:  # backwards compat
+        await self.set_night_light(LightState.ON if enabled else LightState.OFF)
+
+    async def get_night_light(self) -> Optional[LightState]:
+        if self._serial: return None
         v = await self._read_byte("AMBIENT_LIGHT_STATE")
-        return bool(v) if v is not None else None
+        if v is None: return None
+        try: return LightState(v)
+        except ValueError: return LightState.OFF
 
     # ── UVC Hygiene Light ──────────────────────────────────────────────────────
 
@@ -639,9 +663,48 @@ class SensoWashClient:
         v = await self._read_byte("WATER_HARDNESS")
         return WaterHardness(v) if v is not None else None
 
-    async def get_descaling_state(self) -> Optional[bytes]:
-        """Raw descaling state bytes for inspection."""
-        return await self._read("DESCALING_STATE")
+    async def get_descaling_state(self):
+        """Read descaling state. Returns DescalingState(status, counter_a, counter_b) or None."""
+        if self._serial:
+            return await self._serial.get_descaling_state()
+        raw = await self._read("DESCALING_STATE")
+        return DescalingState.from_bytes(raw) if raw else None
+
+    async def get_descaling_remaining_time(self):
+        """Remaining descaling time in minutes. Serial protocol only."""
+        if self._serial:
+            return await self._serial.get_descaling_remaining_time()
+        return None
+
+    async def start_descaling(self) -> None:
+        """Trigger a descaling cycle. Serial protocol only."""
+        if self._serial:
+            from .serial import OP_DESCALING
+            await self._serial.send(OP_DESCALING)
+
+    async def nozzle_self_clean(self) -> None:
+        """Trigger automatic nozzle self-cleaning cycle. Serial protocol only."""
+        if self._serial:
+            from .serial import OP_NOZZLE_SELF_CLEAN
+            await self._serial.send(OP_NOZZLE_SELF_CLEAN)
+
+    async def nozzle_manual_clean(self) -> None:
+        """Extend nozzle for manual cleaning. Serial protocol only."""
+        if self._serial:
+            from .serial import OP_NOZZLE_MANUAL_CLEAN
+            await self._serial.send(OP_NOZZLE_MANUAL_CLEAN)
+
+    async def drain_tank(self, drainage: TankDrainage = TankDrainage.EN_1717) -> None:
+        """Drain the internal tank. Defaults to EN_1717 (BS EN 1717, EU/UK). Serial only."""
+        if self._serial:
+            from .serial import OP_TANK_DRAINAGE
+            await self._serial.send(OP_TANK_DRAINAGE, bytes([drainage.value]))
+
+    async def factory_reset(self) -> None:
+        """Reset to factory defaults. Serial protocol only. Use with care."""
+        if self._serial:
+            from .serial import OP_SET_DEFAULT_SETTINGS
+            await self._serial.send(OP_SET_DEFAULT_SETTINGS)
 
     # ── Seat heating schedule ──────────────────────────────────────────────────
 

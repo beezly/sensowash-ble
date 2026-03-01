@@ -81,6 +81,43 @@ class WaterHardness(IntEnum):
     LEVEL_4 = 4
 
 
+
+
+class ProximityState(IntEnum):
+    """Proximity sensor sensitivity. Reverse-engineered from ProximityState.kt."""
+    NEAR   = 0  # Short range only
+    MEDIUM = 1  # Medium range (factory default)
+    FAR    = 2  # Long range
+
+
+class LightState(IntEnum):
+    """Night light mode. Reverse-engineered from LightState.kt."""
+    OFF  = 0  # Disabled
+    ON   = 1  # Always on
+    AUTO = 2  # Motion/proximity triggered
+
+
+class DeodorizationDelay(IntEnum):
+    """Delay before deodorization activates. Reverse-engineered from DeodorizationDelay.kt."""
+    OFF     = 0  # Immediate
+    DELAY_1 = 1  # Short delay
+    DELAY_2 = 2  # Longer delay
+
+
+class TankDrainage(IntEnum):
+    """Backflow prevention config for tank drainage. EN_1717 = BS EN 1717 (EU/UK standard).
+    Reverse-engineered from TankDrainage.kt. App hardcodes EN_1717 for EU/UK."""
+    EN_1717              = 0  # Standard EU/UK backflow prevention
+    IFS_TANK             = 1  # Integral Flush System tank (Asia/US variants)
+    EN_1717_AND_IFS_TANK = 2  # Both configurations
+
+
+class DescalingStatus(IntEnum):
+    """Descaling process state. Reverse-engineered from DescalingStateState.kt."""
+    IDLE        = 0  # Not descaling
+    IN_PROGRESS = 1  # Descaling cycle running
+    PAUSED      = 2  # Paused (e.g. lid opened mid-cycle)
+
 # ── Complex / composite models ─────────────────────────────────────────────────
 
 @dataclass

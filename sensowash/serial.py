@@ -63,17 +63,23 @@ OP_NOZZLE_SELF_CLEAN     = 0x60
 OP_NOZZLE_MANUAL_CLEAN   = 0x61
 OP_TANK_DRAINAGE         = 0x62
 OP_DESCALING             = 0x63
-OP_WATER_HARDNESS_REQ    = 0x68
-OP_WATER_HARDNESS        = 0x67
-OP_AUTO_LID_OPEN         = 0x43
-OP_AUTO_LID_CLOSE        = 0x44
-OP_AUTO_FLUSH            = 0x45
-OP_AUTO_PREFLUSH         = 0x46
-OP_AUTO_DEODORIZATION    = 0x42
-OP_BEEP_TONE             = 0x40
-OP_NIGHT_LIGHT           = 0x41
-OP_HUMAN_SENSING         = 0x49
-OP_ENERGY_SAVING         = 0x47
+OP_WATER_HARDNESS_REQ            = 0x68
+OP_WATER_HARDNESS                = 0x67
+OP_DESCALING_STATE_REQ           = 0x64
+OP_DESCALING_STATE_RESP          = 0x65
+OP_DESCALING_REMAINING_TIME_REQ  = 0x69
+OP_DESCALING_REMAINING_TIME_RESP = 0x66
+OP_TIME_UPDATE_REQ               = 0x2A
+OP_AUTO_LID_SEAT_OPEN            = 0x43
+OP_AUTO_LID_SEAT_CLOSE           = 0x44
+OP_AUTO_FLUSH                    = 0x45
+OP_AUTO_PREFLUSH                 = 0x46
+OP_AUTO_DEODORIZATION            = 0x42
+OP_AUTO_DEODORIZATION_DELAY      = 0x48
+OP_BEEP_TONE                     = 0x40
+OP_NIGHT_LIGHT                   = 0x41
+OP_HUMAN_SENSING_DISTANCE        = 0x49
+OP_ENERGY_SAVING                 = 0x47
 OP_SERIAL_NUMBER_REQ     = 0x58
 OP_HW_VERSION_REQ        = 0x5A
 OP_SW_VERSION_REQ        = 0x56
@@ -433,3 +439,24 @@ class SerialTransport:
     async def get_water_hardness(self) -> Optional[int]:
         data = await self.request(OP_WATER_HARDNESS_REQ, OP_WATER_HARDNESS_RESP)
         return data[0] if data else None
+
+    async def get_descaling_state(self):
+        '''Query descaling state (op 0x64/0x65). Returns DescalingState or None.
+        Response: [state][a_hi][a_lo][b_hi][b_lo] (big-endian uint16s).'''
+        from .models import DescalingState as _DS
+        data = await self.request(OP_DESCALING_STATE_REQ, OP_DESCALING_STATE_RESP)
+        if data is None:
+            return None
+        return _DS.from_bytes(data)
+
+    async def get_descaling_remaining_time(self) -> Optional[int]:
+        '''Query remaining descaling time in minutes (op 0x69/0x66).
+        Returns minutes remaining as int, or None on timeout.'''
+        data = await self.request(
+            OP_DESCALING_REMAINING_TIME_REQ,
+            OP_DESCALING_REMAINING_TIME_RESP,
+        )
+        if data is None or len(data) < 2:
+            return None
+        return (data[0] * 256) + data[1]
+
