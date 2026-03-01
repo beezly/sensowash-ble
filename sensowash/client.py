@@ -37,6 +37,7 @@ from .models import (
     SeatHeatingSchedule, UvcSchedule,
     model_name_from_article,
 )
+from .serial import SerialTransport, SERVICE_UUID as SERIAL_SERVICE_UUID
 
 
 def _byte(value: int) -> bytes:
@@ -73,6 +74,12 @@ class SensoWashClient:
         self._user_cb = notification_cb
         self._client: Optional[BleakClient] = None
         self._char_cache: Dict[str, BleakGATTCharacteristic] = {}
+        self._serial: Optional[SerialTransport] = None  # set if serial protocol detected
+
+    @property
+    def protocol(self) -> str:
+        """'serial' for older UART-over-BLE models, 'gatt' for modern GATT models."""
+        return "serial" if self._serial else "gatt"
 
     # ── Context manager ────────────────────────────────────────────────────────
 
@@ -86,16 +93,38 @@ class SensoWashClient:
     # ── Connection ─────────────────────────────────────────────────────────────
 
     async def connect(self) -> None:
-        """Connect, sync time, and subscribe to all notifiable characteristics."""
+        """
+        Connect to the toilet and auto-detect the protocol.
+
+        Modern devices (Classic, U, Starck F Pro, i Pro) use GATT services.
+        Older devices (Starck F Lite/Plus, i Lite/Plus) use a UART serial protocol
+        over a proprietary BLE service — detected automatically by checking which
+        services are present after connection.
+        """
         self._client = BleakClient(self._address, timeout=self._timeout)
         await self._client.connect()
         self._char_cache = {}
+        self._serial = None
+
         # Build a flat UUID → characteristic map
         for service in self._client.services:
             for char in service.characteristics:
                 self._char_cache[char.uuid.lower()] = char
-        await self._sync_time()
-        await self._subscribe_all()
+
+        # Detect protocol: check for serial service
+        service_uuids = {s.uuid.lower() for s in self._client.services}
+        if SERIAL_SERVICE_UUID.lower() in service_uuids:
+            _LOGGER.info("Serial (UART-over-BLE) protocol detected")
+            self._serial = SerialTransport(
+                self._client,
+                notification_cb=self._on_serial_notification,
+            )
+            await self._serial.setup()
+            await self._serial.sync_time()
+        else:
+            _LOGGER.info("GATT protocol detected")
+            await self._sync_time()
+            await self._subscribe_all()
 
     async def disconnect(self) -> None:
         if self._client and self._client.is_connected:
@@ -192,10 +221,28 @@ class SensoWashClient:
         if self._user_cb:
             self._user_cb(char.uuid.lower(), bytes(data))
 
+    def _on_serial_notification(self, op_code: int, payload: bytes) -> None:
+        """Forward serial protocol notifications to the user callback as pseudo-UUIDs."""
+        if self._user_cb:
+            self._user_cb(f"serial:0x{op_code:02x}", payload)
+
     # ── Device Information ─────────────────────────────────────────────────────
 
     async def get_device_info(self) -> DeviceInfo:
         """Read manufacturer, model, serial, and revision strings."""
+        if self._serial:
+            info = DeviceInfo(manufacturer="Duravit")
+            sn = await self._serial.get_serial_number()
+            if sn:
+                info.serial_number = sn
+            hw = await self._serial.get_hardware_version()
+            if hw:
+                info.hardware_revision = hw
+            sw = await self._serial.get_software_version()
+            if sw:
+                info.software_revision = sw
+            return info
+
         info = DeviceInfo()
         for field, key in [
             ("manufacturer",       "MANUFACTURER_NAME"),
@@ -219,10 +266,17 @@ class SensoWashClient:
         nozzle_position: NozzlePosition = NozzlePosition.POSITION_2,
     ) -> None:
         """Start rear wash with the given settings."""
-        await self._write("WASH_STATE", _byte(OnOff.ON))
-        await self._write("WATER_FLOW", _byte(water_flow))
-        await self._write("WATER_TEMPERATURE", _byte(water_temperature))
-        await self._write("NOZZLE_POSITION", _byte(nozzle_position))
+        if self._serial:
+            # Serial packet packs flow+nozzle into byte 0, comfortWash+temp into byte 1
+            b0 = (water_flow.value << 4) | nozzle_position.value
+            b1 = (0 << 4) | water_temperature.value  # comfortWash=0 (rear)
+            from .serial import OP_REAR_WASH
+            await self._serial.send(OP_REAR_WASH, bytes([b0, b1]))
+        else:
+            await self._write("WASH_STATE", _byte(OnOff.ON))
+            await self._write("WATER_FLOW", _byte(water_flow))
+            await self._write("WATER_TEMPERATURE", _byte(water_temperature))
+            await self._write("NOZZLE_POSITION", _byte(nozzle_position))
 
     async def start_lady_wash(
         self,
@@ -230,43 +284,72 @@ class SensoWashClient:
         water_temperature: WaterTemperature = WaterTemperature.TEMP_2,
         nozzle_position: NozzlePosition = NozzlePosition.POSITION_2,
     ) -> None:
-        """
-        Start lady wash.
-        The wash type is determined by the comfort wash characteristic (lady = written
-        before wash state). This mirrors how the app selects the wash mode.
-        """
-        await self._write("COMFORT_WASH", _byte(OnOff.ON))
-        await self._write("WATER_FLOW", _byte(water_flow))
-        await self._write("WATER_TEMPERATURE", _byte(water_temperature))
-        await self._write("NOZZLE_POSITION", _byte(nozzle_position))
-        await self._write("WASH_STATE", _byte(OnOff.ON))
+        """Start lady wash."""
+        if self._serial:
+            b0 = (water_flow.value << 4) | nozzle_position.value
+            b1 = (1 << 4) | water_temperature.value  # comfortWash=1 (lady)
+            from .serial import OP_LADY_WASH
+            await self._serial.send(OP_LADY_WASH, bytes([b0, b1]))
+        else:
+            await self._write("COMFORT_WASH", _byte(OnOff.ON))
+            await self._write("WATER_FLOW", _byte(water_flow))
+            await self._write("WATER_TEMPERATURE", _byte(water_temperature))
+            await self._write("NOZZLE_POSITION", _byte(nozzle_position))
+            await self._write("WASH_STATE", _byte(OnOff.ON))
 
     async def stop(self) -> None:
         """Stop any currently active wash or dryer function."""
-        await self._write("STOP_STATE", _byte(0x01))
+        if self._serial:
+            from .serial import OP_STOP
+            await self._serial.send(OP_STOP)
+        else:
+            await self._write("STOP_STATE", _byte(0x01))
 
     async def set_water_flow(self, flow: WaterFlow) -> None:
-        await self._write("WATER_FLOW", _byte(flow))
+        if self._serial:
+            from .serial import OP_WATER_FLOW
+            await self._serial.send(OP_WATER_FLOW, bytes([flow.value]))
+        else:
+            await self._write("WATER_FLOW", _byte(flow))
 
     async def set_water_temperature(self, temp: WaterTemperature) -> None:
-        await self._write("WATER_TEMPERATURE", _byte(temp))
+        if self._serial:
+            from .serial import OP_WATER_TEMPERATURE
+            await self._serial.send(OP_WATER_TEMPERATURE, bytes([temp.value]))
+        else:
+            await self._write("WATER_TEMPERATURE", _byte(temp))
 
     async def set_nozzle_position(self, position: NozzlePosition) -> None:
-        await self._write("NOZZLE_POSITION", _byte(position))
+        if self._serial:
+            from .serial import OP_NOZZLE_POSITION
+            await self._serial.send(OP_NOZZLE_POSITION, bytes([position.value]))
+        else:
+            await self._write("NOZZLE_POSITION", _byte(position))
 
     async def get_wash_state(self) -> Optional[OnOff]:
+        if self._serial:
+            data = await self._serial.get_toilet_state()
+            if data:
+                return OnOff.ON if (data[0] & 0x01) else OnOff.OFF
+            return None
         v = await self._read_byte("WASH_STATE")
         return OnOff(v) if v is not None else None
 
     async def get_water_flow(self) -> Optional[WaterFlow]:
+        if self._serial:
+            return None  # not individually readable on serial protocol
         v = await self._read_byte("WATER_FLOW")
         return WaterFlow(v) if v is not None else None
 
     async def get_water_temperature(self) -> Optional[WaterTemperature]:
+        if self._serial:
+            return None
         v = await self._read_byte("WATER_TEMPERATURE")
         return WaterTemperature(v) if v is not None else None
 
     async def get_nozzle_position(self) -> Optional[NozzlePosition]:
+        if self._serial:
+            return None
         v = await self._read_byte("NOZZLE_POSITION")
         return NozzlePosition(v) if v is not None else None
 
@@ -277,20 +360,38 @@ class SensoWashClient:
         temperature: DryerTemperature = DryerTemperature.TEMP_2,
         speed: DryerSpeed = DryerSpeed.SPEED_0,
     ) -> None:
-        await self._write("DRYER_TEMPERATURE", _byte(temperature))
-        await self._write("DRYER_SPEED", _byte(speed))
-        await self._write("DRYER_STATE", _byte(OnOff.ON))
+        if self._serial:
+            from .serial import OP_DRYING
+            await self._serial.send(OP_DRYING, bytes([temperature.value]))
+        else:
+            await self._write("DRYER_TEMPERATURE", _byte(temperature))
+            await self._write("DRYER_SPEED", _byte(speed))
+            await self._write("DRYER_STATE", _byte(OnOff.ON))
 
     async def stop_dryer(self) -> None:
-        await self._write("DRYER_STATE", _byte(OnOff.OFF))
+        if self._serial:
+            await self.stop()
+        else:
+            await self._write("DRYER_STATE", _byte(OnOff.OFF))
 
     async def set_dryer_temperature(self, temp: DryerTemperature) -> None:
-        await self._write("DRYER_TEMPERATURE", _byte(temp))
+        if self._serial:
+            from .serial import OP_DRYING
+            await self._serial.send(OP_DRYING, bytes([temp.value]))
+        else:
+            await self._write("DRYER_TEMPERATURE", _byte(temp))
 
     async def set_dryer_speed(self, speed: DryerSpeed) -> None:
-        await self._write("DRYER_SPEED", _byte(speed))
+        if not self._serial:
+            await self._write("DRYER_SPEED", _byte(speed))
+        # serial protocol has no separate speed command
 
     async def get_dryer_state(self) -> Optional[OnOff]:
+        if self._serial:
+            data = await self._serial.get_toilet_state()
+            if data:
+                return OnOff.ON if (data[0] & 0x10) else OnOff.OFF
+            return None
         v = await self._read_byte("DRYER_STATE")
         return OnOff(v) if v is not None else None
 
@@ -298,13 +399,25 @@ class SensoWashClient:
 
     async def flush(self) -> None:
         """Trigger a manual flush."""
-        await self._write("FLUSH_STATE", _byte(0x01))
+        if self._serial:
+            from .serial import OP_FULL_FLUSH
+            await self._serial.send(OP_FULL_FLUSH)
+        else:
+            await self._write("FLUSH_STATE", _byte(0x01))
 
     async def set_auto_flush(self, enabled: bool) -> None:
-        await self._write("FLUSH_AUTOMATIC", _byte(OnOff.ON if enabled else OnOff.OFF))
+        if self._serial:
+            from .serial import OP_AUTO_FLUSH
+            await self._serial.send(OP_AUTO_FLUSH, bytes([1 if enabled else 0]))
+        else:
+            await self._write("FLUSH_AUTOMATIC", _byte(OnOff.ON if enabled else OnOff.OFF))
 
     async def set_pre_flush(self, enabled: bool) -> None:
-        await self._write("FLUSH_PRE_FLUSH", _byte(OnOff.ON if enabled else OnOff.OFF))
+        if self._serial:
+            from .serial import OP_AUTO_PREFLUSH
+            await self._serial.send(OP_AUTO_PREFLUSH, bytes([1 if enabled else 0]))
+        else:
+            await self._write("FLUSH_PRE_FLUSH", _byte(OnOff.ON if enabled else OnOff.OFF))
 
     async def get_auto_flush(self) -> Optional[bool]:
         v = await self._read_byte("FLUSH_AUTOMATIC")
@@ -313,19 +426,33 @@ class SensoWashClient:
     # ── Seat & Lid ─────────────────────────────────────────────────────────────
 
     async def open_lid(self) -> None:
-        await self._write("LID_STATE", _byte(LidState.OPEN))
+        if self._serial:
+            from .serial import OP_OPEN_CLOSE_LID
+            await self._serial.send(OP_OPEN_CLOSE_LID)
+        else:
+            await self._write("LID_STATE", _byte(LidState.OPEN))
 
     async def close_lid(self) -> None:
-        await self._write("LID_STATE", _byte(LidState.CLOSED))
+        if self._serial:
+            from .serial import OP_OPEN_CLOSE_LID
+            await self._serial.send(OP_OPEN_CLOSE_LID)
+        else:
+            await self._write("LID_STATE", _byte(LidState.CLOSED))
 
     async def get_lid_state(self) -> Optional[LidState]:
         v = await self._read_byte("LID_STATE")
         return LidState(v) if v is not None else None
 
     async def set_seat_temperature(self, temp: SeatTemperature) -> None:
-        await self._write("SEAT_TEMPERATURE", _byte(temp))
+        if self._serial:
+            from .serial import OP_SEAT_TEMPERATURE
+            await self._serial.send(OP_SEAT_TEMPERATURE, bytes([temp.value]))
+        else:
+            await self._write("SEAT_TEMPERATURE", _byte(temp))
 
     async def get_seat_temperature(self) -> Optional[SeatTemperature]:
+        if self._serial:
+            return None  # readable via function config request, not implemented yet
         v = await self._read_byte("SEAT_TEMPERATURE")
         return SeatTemperature(v) if v is not None else None
 
@@ -347,10 +474,18 @@ class SensoWashClient:
     # ── Deodorization ──────────────────────────────────────────────────────────
 
     async def set_deodorization(self, enabled: bool) -> None:
-        await self._write("DEODORIZATION_STATE", _byte(OnOff.ON if enabled else OnOff.OFF))
+        if self._serial:
+            from .serial import OP_DEODORIZATION
+            await self._serial.send(OP_DEODORIZATION)  # toggle on serial
+        else:
+            await self._write("DEODORIZATION_STATE", _byte(OnOff.ON if enabled else OnOff.OFF))
 
     async def set_deodorization_auto(self, enabled: bool) -> None:
-        await self._write("DEODORIZATION_AUTO", _byte(OnOff.ON if enabled else OnOff.OFF))
+        if self._serial:
+            from .serial import OP_AUTO_DEODORIZATION
+            await self._serial.send(OP_AUTO_DEODORIZATION, bytes([1 if enabled else 0]))
+        else:
+            await self._write("DEODORIZATION_AUTO", _byte(OnOff.ON if enabled else OnOff.OFF))
 
     async def get_deodorization_state(self) -> Optional[bool]:
         v = await self._read_byte("DEODORIZATION_STATE")
@@ -384,14 +519,21 @@ class SensoWashClient:
         Read and decode all active error codes.
         Returns a list of ErrorCode objects (empty list = no errors).
         """
-        data = await self._read("ERROR_CODES")
+        if self._serial:
+            data = await self._serial.get_error_codes()
+        else:
+            data = await self._read("ERROR_CODES")
         if not data:
             return []
         return ErrorCode.decode_payload(data)
 
     async def set_mute(self, muted: bool) -> None:
         """Mute or unmute the toilet's beep tones."""
-        await self._write("MUTE", _byte(OnOff.ON if muted else OnOff.OFF))
+        if self._serial:
+            from .serial import OP_BEEP_TONE
+            await self._serial.send(OP_BEEP_TONE, bytes([1 if muted else 0]))
+        else:
+            await self._write("MUTE", _byte(OnOff.ON if muted else OnOff.OFF))
 
     async def get_mute(self) -> Optional[bool]:
         v = await self._read_byte("MUTE")
@@ -523,6 +665,44 @@ class SensoWashClient:
         def has(key: str) -> bool:
             uuid = CHARACTERISTICS.get(key, "").lower()
             return uuid in self._char_cache
+
+        # Serial protocol: query function list from toilet
+        if self._serial:
+            fl = await self._serial.get_function_list() or {}
+            sn = await self._serial.get_serial_number()
+            return DeviceCapabilities(
+                model_name="SensoWash (serial protocol)",
+                article_number=sn or "",
+                rear_wash=fl.get("washing", False),
+                lady_wash=fl.get("washing", False),
+                water_flow_control=fl.get("washing", False),
+                nozzle_position_control=fl.get("washing", False),
+                water_temperature_control=fl.get("washing", False),
+                dryer=fl.get("drying", False),
+                dryer_temperature_control=fl.get("drying", False),
+                dryer_speed_control=False,  # no serial speed control
+                flush=fl.get("flushing", False),
+                auto_flush=fl.get("flushing", False),
+                pre_flush=fl.get("flushing", False),
+                seat=fl.get("seat", False),
+                seat_auto=fl.get("lid", False),
+                lid=fl.get("lid", False),
+                lid_auto=fl.get("lid", False),
+                seat_heating=fl.get("seat_heating", False),
+                seat_heating_schedule=fl.get("seat_heating", False),
+                proximity_detection=fl.get("human_sensor", False),
+                actual_seat_temperature=False,
+                deodorization=fl.get("deodorization", False),
+                deodorization_auto=fl.get("deodorization", False),
+                ambient_light=False,
+                uvc_light=False,
+                uvc_auto=False,
+                uvc_schedule=False,
+                descaling=fl.get("descaling", False),
+                water_hardness=fl.get("descaling", False),
+                mute=True,  # all serial devices support beep tone
+                error_codes=True,
+            )
 
         # Resolve model name from article number
         article = ""

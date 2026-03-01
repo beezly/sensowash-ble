@@ -48,7 +48,7 @@ async def main():
         print(f"  📡 notification [{uuid[-8:]}] → {data.hex()}")
 
     async with SensoWashClient(address, notification_cb=on_notification) as toilet:
-        print("✅ Connected!\n")
+        print(f"✅ Connected! (protocol: {toilet.protocol})\n")
 
         # ── Device Info ────────────────────────────────────────────────────────
         print("── Device Information ──────────────────────────────────")

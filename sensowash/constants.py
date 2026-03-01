@@ -9,7 +9,8 @@ All UUIDs reverse-engineered from com.duravit.sensowash v2.1.19
 DEVICE_NAME_PREFIXES = [
     "SensoWash",   # covers SensoWash c / u / s / i
     "DuraSystem",  # actuator plate / DuraSystem devices
-    "duravit",     # older serial-protocol devices
+    "duravit",     # older serial-protocol devices (lowercase)
+    "DURAVIT",     # older serial-protocol devices (uppercase, e.g. DURAVIT_BT)
 ]
 
 # ── Services ──────────────────────────────────────────────────────────────────
