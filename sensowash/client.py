@@ -29,7 +29,11 @@ from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.characteristic import BleakGATTCharacteristic
 
+import logging
+
 from .constants import CHARACTERISTICS, DEVICE_NAME_PREFIXES
+
+_LOGGER = logging.getLogger(__name__)
 from .models import (
     DeviceInfo, ToiletState, ErrorCode, DeviceCapabilities,
     OnOff, WaterFlow, WaterTemperature, NozzlePosition,
