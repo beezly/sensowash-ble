@@ -899,7 +899,7 @@ class SensoWashClient:
                 actual_seat_temperature=False,
                 deodorization=fl.get("deodorization", False),
                 deodorization_auto=fl.get("deodorization", False),
-                ambient_light=False,
+                ambient_light=True,  # serial: OP_NIGHT_LIGHT (write-only, no readback)
                 uvc_light=False,
                 uvc_auto=False,
                 uvc_schedule=False,
