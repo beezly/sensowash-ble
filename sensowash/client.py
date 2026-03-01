@@ -843,6 +843,19 @@ class SensoWashClient:
         )
 
 
+
+    async def get_is_seated(self) -> Optional[bool]:
+        """
+        Return whether a person is currently detected as seated.
+
+        Uses the seat sensor bits from the serial state response.
+        Returns ``None`` for GATT-protocol devices (no seat sensor in the GATT profile).
+        """
+        state = await self.get_toilet_state_raw()
+        if state is None:
+            return None
+        return state.get('seated', False)
+
     async def get_toilet_state_raw(self):
         '''Return raw toilet state dict from serial protocol, or None for GATT devices.'''  
         if self._serial:
