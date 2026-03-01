@@ -314,7 +314,9 @@ class DeviceCapabilities:
     lid_auto:                 bool = False
     seat_heating:             bool = False
     seat_heating_schedule:    bool = False
-    proximity_detection:      bool = False
+    proximity_detection:      bool = False   # device has a proximity sensor (can be toggled)
+    seat_occupied_sensor:     bool = False   # device can report live occupancy state
+                                             # (serial protocol only — reads state bitmask)
     actual_seat_temperature:  bool = False
 
     # Deodorization
@@ -361,6 +363,7 @@ class DeviceCapabilities:
             f"  Seat heating:            {'✓' if self.seat_heating else '✗'}",
             f"  Seat heating schedule:   {'✓' if self.seat_heating_schedule else '✗'}",
             f"  Proximity detection:     {'✓' if self.proximity_detection else '✗'}",
+            f"  Seat occupied sensor:    {'✓' if self.seat_occupied_sensor else '✗'}",
             f"  Actual seat temp sensor: {'✓' if self.actual_seat_temperature else '✗'}",
             "── Comfort ───────────────────────",
             f"  Deodorization:           {'✓' if self.deodorization else '✗'}",
