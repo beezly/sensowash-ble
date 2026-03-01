@@ -43,7 +43,45 @@ _DECODERS = {
 }
 
 
+
+# Serial protocol notification decoder
+_SERIAL_DECODERS = {
+    0x53: 'Toilet State',
+    0x55: 'Error Codes',
+    0x5d: 'Function List',
+    0x59: 'Serial Number',
+    0x5b: 'Hardware Version',
+    0x57: 'Software Version',
+    0x65: 'Descaling State',
+    0x67: 'Water Hardness',
+}
+
+def decode_serial_notification(pseudo_uuid: str, data: bytes) -> str:
+    try:
+        op = int(pseudo_uuid.split('0x')[1], 16)
+    except Exception:
+        return f"serial raw={data.hex()}"
+    label = _SERIAL_DECODERS.get(op, f'op=0x{op:02x}')
+    if op == 0x53 and len(data) >= 2:  # toilet state
+        b0, b1 = data[0], data[1]
+        parts = []
+        if b0 & 0x01: parts.append('washing')
+        if b0 & 0x10: parts.append('drying')
+        if b0 & 0x04 or b0 & 0x40: parts.append('seated')
+        if b1 & 0x01: parts.append('deodorizing')
+        return f"{label}: " + (', '.join(parts) if parts else 'idle')
+    if op == 0x55:  # error codes
+        errors = []
+        for byte_idx, byte_val in enumerate(data):
+            for bit_idx in range(8):
+                if byte_val & (1 << bit_idx):
+                    errors.append(byte_idx * 8 + bit_idx + 1)
+        return f"{label}: " + (str(errors) if errors else 'none')
+    return f"{label}: {data.hex()}"
+
 def decode_notification(uuid: str, data: bytes) -> str:
+    if uuid.startswith('serial:'):
+        return decode_serial_notification(uuid, data)
     entry = _DECODERS.get(uuid)
     if entry is None:
         return f"raw={data.hex()}"

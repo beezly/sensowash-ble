@@ -123,7 +123,7 @@ class SensoWashClient:
                 self._client,
                 notification_cb=self._on_serial_notification,
             )
-            await self._serial.setup()
+            await self._serial.setup(pairing_key_file=__import__("pathlib").Path.home() / ".sensowash_pairing_key.json")
             await self._serial.sync_time()
         else:
             _LOGGER.info("GATT protocol detected")
@@ -465,15 +465,26 @@ class SensoWashClient:
         return await self._read_byte("SEAT_ACTUAL_TEMP")
 
     async def set_proximity_detection(self, enabled: bool) -> None:
-        await self._write("SEAT_PROXIMITY", _byte(OnOff.ON if enabled else OnOff.OFF))
+        if self._serial:
+            from .serial import OP_HUMAN_SENSING
+            await self._serial.send(OP_HUMAN_SENSING, bytes([1 if enabled else 0]))
+        else:
+            await self._write("SEAT_PROXIMITY", _byte(OnOff.ON if enabled else OnOff.OFF))
 
     async def get_proximity_detection(self) -> Optional[bool]:
+        if self._serial:
+            return None  # not individually readable on serial; use get_function_config
         v = await self._read_byte("SEAT_PROXIMITY")
         return bool(v) if v is not None else None
 
     async def set_seat_auto(self, enabled: bool) -> None:
         """Enable/disable automatic seat lowering."""
-        await self._write("SEAT_AUTOMATIC", _byte(OnOff.ON if enabled else OnOff.OFF))
+        if self._serial:
+            from .serial import OP_AUTO_LID_SEAT_OPEN, OP_AUTO_LID_SEAT_CLOSE
+            op = OP_AUTO_LID_SEAT_OPEN if enabled else OP_AUTO_LID_SEAT_CLOSE
+            await self._serial.send(op, bytes([1]))
+        else:
+            await self._write("SEAT_AUTOMATIC", _byte(OnOff.ON if enabled else OnOff.OFF))
 
     # ── Deodorization ──────────────────────────────────────────────────────────
 
@@ -498,9 +509,15 @@ class SensoWashClient:
     # ── Ambient Light ──────────────────────────────────────────────────────────
 
     async def set_ambient_light(self, enabled: bool) -> None:
-        await self._write("AMBIENT_LIGHT_STATE", _byte(OnOff.ON if enabled else OnOff.OFF))
+        if self._serial:
+            from .serial import OP_NIGHT_LIGHT
+            await self._serial.send(OP_NIGHT_LIGHT, bytes([1 if enabled else 0]))
+        else:
+            await self._write("AMBIENT_LIGHT_STATE", _byte(OnOff.ON if enabled else OnOff.OFF))
 
     async def get_ambient_light(self) -> Optional[bool]:
+        if self._serial:
+            return None  # not individually readable on serial
         v = await self._read_byte("AMBIENT_LIGHT_STATE")
         return bool(v) if v is not None else None
 
@@ -540,13 +557,22 @@ class SensoWashClient:
             await self._write("MUTE", _byte(OnOff.ON if muted else OnOff.OFF))
 
     async def get_mute(self) -> Optional[bool]:
+        if self._serial:
+            return None  # not individually readable on serial
         v = await self._read_byte("MUTE")
         return bool(v) if v is not None else None
 
     async def set_water_hardness(self, hardness: WaterHardness) -> None:
-        await self._write("WATER_HARDNESS", _byte(hardness))
+        if self._serial:
+            from .serial import OP_WATER_HARDNESS
+            await self._serial.send(OP_WATER_HARDNESS, bytes([hardness.value]))
+        else:
+            await self._write("WATER_HARDNESS", _byte(hardness))
 
     async def get_water_hardness(self) -> Optional[WaterHardness]:
+        if self._serial:
+            v = await self._serial.get_water_hardness()
+            return WaterHardness(v) if v is not None else None
         v = await self._read_byte("WATER_HARDNESS")
         return WaterHardness(v) if v is not None else None
 
@@ -564,6 +590,34 @@ class SensoWashClient:
         The toilet runs this schedule autonomously — seat heating turns on/off
         at the configured times without needing BLE connection.
         """
+        if self._serial:
+            cfg = await self._serial.get_function_config()
+            if cfg is None:
+                return None
+            from .models import SeatScheduleWindow
+            windows = []
+            for w in cfg.get("schedule_windows", []):
+                days = tuple(
+                    day + 1 for day in range(7) if w["day_mask"] & (1 << day)
+                )
+                if days:
+                    windows.append(SeatScheduleWindow(
+                        from_hour=w["from_hour"],
+                        from_minute=w["from_minute"],
+                        to_hour=w["to_hour"],
+                        to_minute=w["to_minute"],
+                        days=days,
+                    ))
+            temp_val = cfg.get("seat_temperature") or 1
+            try:
+                temp = SeatTemperature(temp_val)
+            except ValueError:
+                temp = SeatTemperature.TEMP_1
+            return SeatHeatingSchedule(
+                enabled=cfg.get("energy_saving_on", False),
+                temperature=temp,
+                windows=windows,
+            )
         data = await self._read("SEAT_TEMPERATURE_PROGRAMMED")
         if data is None:
             return None
@@ -600,6 +654,26 @@ class SensoWashClient:
             )
             await toilet.set_seat_heating_schedule(schedule)
         """
+        if self._serial:
+            # Serial protocol encodes schedule via OP_ENERGY_SAVING
+            # Format: [temp<<4|state][n_chunks][chunk_size][day_mask][fh][fm][th][tm]...
+            from .serial import OP_ENERGY_SAVING
+            state_byte = (schedule.temperature.value << 4) | (1 if schedule.enabled else 0)
+            entries = []
+            for w in schedule.windows:
+                day_mask = 0
+                for d in w.days:
+                    day_mask |= (1 << (d - 1))
+                entries.append(bytes([day_mask, w.from_hour, w.from_minute, w.to_hour, w.to_minute]))
+            # Chunk into groups of 7 (serial protocol limit per packet)
+            chunks = [entries[i:i+7] for i in range(0, len(entries), 7)] or [[]]
+            payload = bytes([state_byte])
+            for chunk in chunks:
+                payload += bytes([len(chunk)])
+                for entry in chunk:
+                    payload += entry
+            await self._serial.send(OP_ENERGY_SAVING, payload)
+            return
         payload = schedule.to_bytes()
         await self._write("SEAT_TEMPERATURE_PROGRAMMED", payload)
 
@@ -764,11 +838,41 @@ class SensoWashClient:
             error_codes=has("ERROR_CODES"),
         )
 
+
+    async def get_toilet_state_raw(self):
+        '''Return raw toilet state dict from serial protocol, or None for GATT devices.'''  
+        if self._serial:
+            data = await self._serial.get_toilet_state()
+            if not data or len(data) < 2:
+                return None
+            b0, b1 = data[0], data[1]
+            return {
+                'washing':              bool(b0 & 0x01),
+                'wash_initializing':   bool(b0 & 0x02),
+                'seated_wash':         bool(b0 & 0x04),
+                'wash_powered':        bool(b0 & 0x08),
+                'drying':              bool(b0 & 0x10),
+                'dry_initializing':    bool(b0 & 0x20),
+                'seated_dry':          bool(b0 & 0x40),
+                'dry_powered':         bool(b0 & 0x80),
+                'deodorizing_idle':    not bool(b1 & 0x01),
+                'deodorizing':         bool(b1 & 0x01),
+                'seated':              bool((b0 & 0x04) or (b0 & 0x40)),
+            }
+        return None
+
     async def get_full_state(self) -> Dict[str, Any]:
         """
         Read all readable characteristics and return a dict snapshot.
         Useful for debugging or building a dashboard.
         """
+        if self._serial:
+            state = await self.get_toilet_state_raw() or {}
+            errors = await self.get_error_codes()
+            hw = await self.get_water_hardness()
+            state["water_hardness"] = hw
+            state["errors"] = errors
+            return state
         reads = {
             "wash_state":         ("WASH_STATE",         OnOff),
             "water_flow":         ("WATER_FLOW",         WaterFlow),

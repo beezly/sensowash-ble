@@ -87,6 +87,7 @@ async def main():
         print("  6) Close lid")
         print("  7) Set seat temperature")
         print("  8) Toggle ambient light")
+        print("  t) Ambient light blink test (5x toggle, restore)")
         print("  9) Toggle mute")
         print("  s) View / set seat heating schedule")
         print("  u) View / set UVC disinfection schedule")
@@ -156,6 +157,9 @@ async def main():
             new_state = not current if current is not None else True
             await toilet.set_ambient_light(new_state)
             print(f"  💡 Ambient light {'on' if new_state else 'off'}.")
+
+        elif choice == "t":
+            await demo_ambient_blink(toilet)
 
         elif choice == "9":
             current = await toilet.get_mute()
@@ -267,6 +271,21 @@ async def demo_uvc_schedule(toilet: SensoWashClient) -> None:
         await toilet.set_uvc_schedule(UvcSchedule(triggers=[]))
         print("  ✅ UVC schedule cleared.")
 
+
+
+async def demo_ambient_blink(toilet: SensoWashClient) -> None:
+    """Toggle ambient light 5 times (once per second), then restore original state."""
+    print("\n── Ambient Light Blink Test ───────────────────────────")
+    original = await toilet.get_ambient_light()
+    print(f"  Current state: {'on' if original else 'off'}")
+    current = original
+    for i in range(5):
+        current = not current
+        await toilet.set_ambient_light(current)
+        print(f"  [{i+1}/5] {'on' if current else 'off'}")
+        await asyncio.sleep(1)
+    await toilet.set_ambient_light(original)
+    print(f"  Restored to: {'on' if original else 'off'}")
 
 if __name__ == "__main__":
     try:

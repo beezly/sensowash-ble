@@ -299,10 +299,26 @@ Devices with name containing `duravit` use a UART-over-BLE protocol (not GATT se
 | Time Update | 0x2B | Sync RTC | `[YY][MM][DD][HH][mm][ss]` (YY = year-2000) |
 | Toilet State Req | 0x52 | Poll state | — |
 | Toilet State Resp | 0x53 | State response | 2 bitmask bytes (see below) |
-| Function List Req | 0x5C | Feature caps | — |
-| Function List Resp | 0x5D | Feature caps | 2 bitmask bytes |
 | Error Codes Req | 0x54 | Get errors | — |
 | Error Codes Resp | 0x55 | Error data | bitmask bytes |
+| SW Version Req | 0x56 | Get firmware version | — |
+| SW Version Resp | 0x57 | Firmware version string | UTF-8 |
+| Serial Number Req | 0x58 | Get serial number | — |
+| Serial Number Resp | 0x59 | Serial number | bytes |
+| HW Version Req | 0x5A | Get hardware version | — |
+| HW Version Resp | 0x5B | Hardware version | bytes |
+| Function List Req | 0x5C | Feature caps | — |
+| Function List Resp | 0x5D | Feature caps | 2 bitmask bytes |
+| Set Defaults | 0x5E | Factory reset | — |
+| Function Config Req | 0x50 | Full auto/schedule config | — |
+| Function Config Resp | 0x51 | Config payload | see below |
+| Auto Deodorization | 0x42 | Set auto deodorization | `[0/1]` |
+| Auto Lid Open | 0x43 | Set auto lid open | `[0/1]` |
+| Auto Lid Close | 0x44 | Set auto lid close | `[0/1]` |
+| Auto Flush | 0x45 | Set auto flush | `[0/1]` |
+| Auto Pre-Flush | 0x46 | Set auto pre-flush | `[0/1]` |
+| Energy Saving | 0x47 | Set seat heating schedule | see below |
+| Descaling State Resp | 0x65 | Descaling state | — |
 
 ### Toilet State Response (0x53) Bitmask
 
@@ -417,6 +433,68 @@ payload = bytes([2, 0, 0,   # 02:00
 
 ---
 
+---
+
+### Function Config Request / Response (0x50 / 0x51) — Serial Protocol
+
+Returns the toilet's full automation config plus the seat heating schedule.
+Send `OP_FUNCTION_CONFIG_REQ` (0x50) with no payload; response opcode is 0x51.
+
+#### Response Payload Layout
+
+```
+Offset  Size  Field
+──────────────────────────────────────────────────────────────────
+0       1     b0 — automation flags byte 0
+                bit 0:    auto_deodorization
+                bits 2-3: night_light level (0–3)
+                bits 4-5: deodorization_delay (0–3)
+                bit 6:    auto_preflush
+                bit 7:    auto_flush
+1       1     b1 — automation flags byte 1
+                bit 0:    auto_lid_close
+                bit 1:    auto_lid_open
+                bit 4:    human_sensing
+                bits 5-6: proximity_state (0–3)
+2       1     seat config
+                bits 4-5: seat_temperature (SeatTemperature enum, 0–3)
+3       1     n — number of schedule windows (0 = energy saving off)
+4+      5×n   schedule windows (see below)
+```
+
+#### Schedule Window Entry (5 bytes each)
+
+```
+Offset  Size  Field
+──────────────────────────────────────────────────────
+0       1     day_mask  — bitmask, Mon=bit0, Tue=bit1, … Sun=bit6
+1       1     from_hour   0–23
+2       1     from_minute 0–59
+3       1     to_hour     0–23
+4       1     to_minute   0–59
+```
+
+A single entry can span multiple days via `day_mask`. This differs from the GATT
+characteristic format which stores one 7-byte entry **per day**.
+
+---
+
+### Energy Saving / Seat Heating Schedule Write (0x47) — Serial Protocol
+
+Sends `OP_ENERGY_SAVING` (0x47) with the following payload to update the schedule:
+
+```
+Offset  Size  Field
+──────────────────────────────────────────────────────
+0       1     state byte: bits 7-4 = seat_temperature, bit 0 = enabled (1/0)
+1       1     chunk_count — number of windows in this chunk
+2+      5×n   window entries (same format as Function Config response)
+```
+
+If there are more than 7 windows, split into multiple 0x47 packets each with its own
+`chunk_count`. An empty schedule is sent as `[state_byte, 0x00]`.
+
+
 ## Notes
 
 - The app includes a fully-implemented virtual toilet simulator (all models) in the release
@@ -425,5 +503,3 @@ payload = bytes([2, 0, 0,   # 02:00
   pairing mode.
 - Model identification uses article numbers from the Device Information `MODEL_NUMBER`
   characteristic matched against sets of known article numbers per model class.
-- Energy saving schedules are encoded as multi-byte structures in the programmed temperature
-  / UVC characteristics (format not fully decoded here).

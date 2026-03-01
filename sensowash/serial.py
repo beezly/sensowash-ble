@@ -4,15 +4,18 @@ Serial (UART-over-BLE) transport for older Duravit SensoWash devices.
 Used by:  SensoWash Starck F Lite / Plus, i Lite / Plus (China/USA/Asia)
           Any device advertising as DURAVIT_BT or with name containing "duravit"
 
-Wire format (from SerialPacket.kt):
-    [0x55][type][length][opCode][payload...][checksum]
+Wire format (from SerialPacket.kt / PROTOCOL.md):
+    [0x55][type][opCode][payload...]
 
-    type     = 0x05 (typeData) for all commands
-    length   = len(payload) + 3
-    checksum = (length + opCode + sum(payload)) & 0xFF
+    type = 0x01 (Command) for host→toilet
+         = 0x02 (Response) for toilet→host
+         = 0x03 (Event)
+         = 0x05 (Data)
 """
 
 from __future__ import annotations
+import json
+import pathlib
 
 import asyncio
 import logging
@@ -29,6 +32,7 @@ SERVICE_UUID  = "00011111-0405-0607-0809-0a0b0c0d11ff"
 CHAR_RX       = "00012222-0405-0607-0809-0a0b0c0d11ff"  # toilet → host (notify)
 CHAR_TX       = "00013333-0405-0607-0809-0a0b0c0d11ff"  # host → toilet (write)
 CHAR_SHAKE    = "00014444-0405-0607-0809-0a0b0c0d11ff"  # handshake
+CHAR_TB       = "00015555-0405-0607-0809-0a0b0c0d11ff"  # unknown (TB)
 
 # ── Packet type / op-code constants ───────────────────────────────────────────
 TYPE_DATA     = 0x05
@@ -100,14 +104,15 @@ def _build_packet(op_code: int, payload: bytes = b"") -> bytes:
 
 def _parse_packet(data: bytes) -> Optional[tuple[int, bytes]]:
     """
-    Parse a received packet.  Returns (opCode, payload) or None if invalid.
+    Parse a received packet: [0x55][?][length][opCode][payload...]
+    Returns (opCode, payload) or None if invalid.
     """
-    if len(data) < 5 or data[0] != 0x55:
+    if len(data) < 4 or data[0] != 0x55:
         return None
     op_code = data[3]
-    length  = data[2]
-    payload_end = 3 + length - 2  # length includes opCode + checksum
-    payload = data[4:payload_end + 1]
+    # Use length field to strip trailing checksum byte
+    payload_len = max(0, data[2] - 3)
+    payload = data[4:4 + payload_len]
     return op_code, payload
 
 
@@ -130,8 +135,10 @@ class SerialTransport:
         self._rx_char: Optional[BleakGATTCharacteristic] = None
         self._tx_char: Optional[BleakGATTCharacteristic] = None
 
-    async def setup(self) -> bool:
-        """Subscribe to RX notifications.  Returns True if serial service found."""
+    async def setup(self, pairing_key_file: Optional[pathlib.Path] = None) -> bool:
+        """Subscribe to RX notifications and perform shake handshake.
+        Returns True if serial service found and handshake succeeded.
+        """
         char_map = {
             c.uuid.lower(): c
             for svc in self._client.services
@@ -139,11 +146,62 @@ class SerialTransport:
         }
         self._rx_char = char_map.get(CHAR_RX)
         self._tx_char = char_map.get(CHAR_TX)
+        shake_char = char_map.get(CHAR_SHAKE)
         if not self._rx_char or not self._tx_char:
             return False
         await self._client.start_notify(self._rx_char, self._on_notification)
+
+        # Handshake: required before the toilet will respond to any command.
+        # On first connect: write [0,0,0,0] → toilet notifies with pairing key.
+        # On subsequent connects: write the stored pairing key directly.
+        if shake_char:
+            await self._handshake(shake_char, pairing_key_file)
+
         _LOGGER.debug("Serial transport ready")
         return True
+
+    async def _handshake(
+        self,
+        shake_char,
+        pairing_key_file: Optional[pathlib.Path] = None,
+        timeout: float = 5.0,
+    ) -> None:
+        """Perform the BLE shake/pairing handshake."""
+        stored_key: Optional[bytes] = None
+        if pairing_key_file and pairing_key_file.exists():
+            try:
+                stored_key = bytes(json.loads(pairing_key_file.read_text()))
+                _LOGGER.debug("Loaded pairing key from %s", pairing_key_file)
+            except Exception:
+                stored_key = None
+
+        if stored_key:
+            # Already paired: write key directly, no notification needed
+            _LOGGER.debug("Re-using stored pairing key")
+            await self._client.write_gatt_char(shake_char, stored_key, response=True)
+            return
+
+        # First time: subscribe to shake notifications, write zeros, wait for key
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+
+        async def on_shake(_char, data: bytearray):
+            if not fut.done():
+                loop.call_soon_threadsafe(fut.set_result, bytes(data))
+
+        await self._client.start_notify(shake_char, on_shake)
+        _LOGGER.debug("Shake: writing first-time pairing packet [0,0,0,0]")
+        await self._client.write_gatt_char(shake_char, bytes(4), response=True)
+
+        try:
+            pairing_key = await asyncio.wait_for(fut, timeout=timeout)
+            _LOGGER.debug("Shake: got pairing key %s", pairing_key.hex())
+            if pairing_key_file:
+                pairing_key_file.parent.mkdir(parents=True, exist_ok=True)
+                pairing_key_file.write_text(json.dumps(list(pairing_key)))
+                _LOGGER.debug("Pairing key saved to %s", pairing_key_file)
+        except asyncio.TimeoutError:
+            _LOGGER.warning("Shake handshake timed out — toilet may not respond to commands")
 
     def _on_notification(self, _: BleakGATTCharacteristic, data: bytearray) -> None:
         parsed = _parse_packet(bytes(data))
@@ -156,7 +214,7 @@ class SerialTransport:
         if op_code in self._pending:
             fut = self._pending.pop(op_code)
             if not fut.done():
-                fut.get_event_loop().call_soon_threadsafe(fut.set_result, payload)
+                asyncio.get_event_loop().call_soon_threadsafe(fut.set_result, payload)
         # Forward to user callback
         if self._user_cb:
             self._user_cb(op_code, payload)
@@ -268,6 +326,56 @@ class SerialTransport:
     async def get_error_codes(self) -> Optional[bytes]:
         """Raw error code bitmask payload."""
         return await self.request(OP_ERROR_CODES_REQ, OP_ERROR_CODES_RESP)
+
+
+    async def get_function_config(self) -> Optional[dict]:
+        """
+        Query the toilet full function configuration (op 0x50/0x51).
+
+        Returns a dict with auto settings and seat heating schedule windows.
+        Schedule window keys per entry: day_mask, from_hour, from_minute, to_hour, to_minute.
+        day_mask bits: Mon=0, Tue=1, Wed=2, Thu=3, Fri=4, Sat=5, Sun=6.
+        Seat temp is in bits 4-5 of payload[2].
+        """
+        data = await self.request(OP_FUNCTION_CONFIG_REQ, OP_FUNCTION_CONFIG_RESP)
+        if data is None or len(data) < 2:
+            return None
+        b0, b1 = data[0], data[1]
+        result = {
+            "auto_deodorization":   bool(b0 & 0x01),
+            "night_light":          (b0 >> 2) & 0x03,
+            "deodorization_delay":  (b0 >> 4) & 0x03,
+            "auto_preflush":        bool(b0 & 0x40),
+            "auto_flush":           bool(b0 & 0x80),
+            "auto_lid_close":       bool(b1 & 0x01),
+            "auto_lid_open":        bool(b1 & 0x02),
+            "human_sensing":        bool(b1 & 0x10),
+            "proximity_state":      (b1 >> 5) & 0x03,
+            "seat_temperature":     None,
+            "energy_saving_on":     False,
+            "schedule_windows":     [],
+        }
+        if len(data) > 2:
+            result["seat_temperature"] = (data[2] >> 4) & 0x03
+        if len(data) > 3:
+            n = data[3]
+            result["energy_saving_on"] = n > 0
+            windows = []
+            offset = 4
+            for _ in range(n):
+                if offset + 5 > len(data):
+                    break
+                day_mask, fh, fm, th, tm = data[offset:offset+5]
+                windows.append({
+                    "day_mask":    day_mask,
+                    "from_hour":   fh,
+                    "from_minute": fm,
+                    "to_hour":     th,
+                    "to_minute":   tm,
+                })
+                offset += 5
+            result["schedule_windows"] = windows
+        return result
 
     async def get_water_hardness(self) -> Optional[int]:
         data = await self.request(OP_WATER_HARDNESS_REQ, OP_WATER_HARDNESS_RESP)
